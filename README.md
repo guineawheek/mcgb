@@ -32,12 +32,17 @@ Execution, albeit very slowly.
 What doesn't work
 =================
 Input. Not at all. Too slow.
+
 No save file system
+
 No sound (this is Minecraft)
+
 Invalid paths to roms will produce a cryptic error about trying to call a function of nil.
 
 What could be done
 ==================
 Make it faster.
+
 Write a proper input system.
+
 (Somehow get sound working???)
