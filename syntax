@@ -1,0 +1,3 @@
+-- vi:syntax=lua
+bit.lshift = bit.blshift
+bit.rshift = bit.brshift

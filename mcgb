@@ -1,0 +1,3881 @@
+-- vi:syntax=lua
+bit.lshift = bit.blshift
+bit.rshift = bit.brshift
+multipaint = {}
+multipaint.__index = multipaint
+
+setmetatable(multipaint, {
+    __call = function(cls, ...)
+        return cls.new(...)
+    end,
+})
+
+function multipaint.new(monitors)
+    local self = setmetatable({}, multipaint)
+    self.map = monitors
+    return self
+end
+
+function multipaint:drawPixel(x, y, color)
+    for i = 1,#self.map do
+        if x >= self.map[i][2][1] and x <= self.map[i][2][2] and
+           y >= self.map[i][3][1] and y <= self.map[i][3][2] then
+            t = self.map[i][1]
+
+            print(x..','..y.."\r\n")
+            term.redirect(t) 
+            paintutils.drawPixel(x - self.map[i][2][1], y - self.map[i][3][1], color)
+            term.redirect(term.native())
+            return
+        end
+    end
+end
+Operators = {}
+
+local band = bit.band
+local bor = bit.bor
+local bxor = bit.bxor
+local bshr = bit.rshift
+local bshl = bit.lshift
+
+local function HL()
+	return bor( bshl( H, 8 ), L )
+end
+
+
+
+
+--- 16 bit arithmatic/logic functions ---
+local function WordInc(R1, R2)
+	R1 = band( (R1+1) , 0xFF )
+	if R1 == 0 then R2 = band( (R2+1) , 0xFF ) end
+	
+	PC = PC + 1
+	Cycle = 8 
+	
+	return R1, R2
+end
+
+local function WordDec(R1, R2)
+	R1 = band( (R1-1 ), 0xFF )
+	if R1 == 0xFF then R2 = band( (R2-1) , 0xFF ) end
+	
+	PC = PC + 1
+	Cycle = 8
+	
+	return R1, R2
+end
+
+local function WordAdd(R1, R2)
+
+	Hf = (   band( H , 0xF ) + band( R1 , 0xF ) + (((L + R2) > 0xFF) and 1 or 0)) > 0xF
+
+	H = H + R1
+	L = L + R2
+
+	if L > 0xFF then
+		H = H + 1
+		L = band( L , 0xFF )
+	end
+	
+	if H > 0xFF then
+		H = band( H , 0xFF )
+		Cf = true
+	else
+		Cf = false
+	end
+	
+	Nf = false
+
+	PC = PC + 1
+	Cycle = 8
+end
+
+--- Jumps/Calls, general Flow control--
+
+local function JumpSign(Val)
+	if Val then
+		local D8 = Read(PC+1)
+		
+		PC = PC + ( band(D8, 127) -  band(D8, 128)) + 2
+
+		PC = band( PC , 0xFFFF )
+
+		Cycle = 12
+	else
+		PC = PC + 2
+		Cycle = 8
+	end
+end
+
+local function Jump(Val)
+	if Val then
+		local A16 = bor( bshl(Read(PC+2),8) , Read(PC+1) )
+		
+		PC = A16
+		Cycle = 16
+	else
+		PC = PC + 3
+		Cycle = 12
+	end
+end
+
+local function Call(Val)
+	if Val then
+		local A16 = bor( bshl(Read(PC+2),8) , Read(PC+1) )
+		
+		SP = SP - 2
+		Write(SP + 1, bshr( band((PC+3), 0xFF00) , 8 ) )
+		Write(SP    , band( (PC+3) , 0xFF )      )
+
+		PC = A16
+		Cycle = 24
+	else
+		PC = PC + 3
+		Cycle = 12
+	end
+end
+
+local function Return(Val)
+	if Val then
+
+		PC = bor( bshl(Read( SP + 1 ),8) , Read( SP ) )
+		SP = SP + 2
+		
+		Cycle = 20
+	else
+		PC = PC + 1
+		Cycle = 8
+	end
+end
+		
+local function ResetPC(Addr)
+	SP = SP - 2
+	Write(SP + 1, bshr( band((PC+1), 0xFF00) , 8 ) )
+	Write(SP    , band( (PC+1) , 0xFF )      )
+	
+	PC = Addr
+	Cycle = 16
+end
+
+
+--- Stack Operations --- 
+
+local function StackPush( R1, R2 )
+	SP = SP - 2
+	Write( SP  + 1, R1 )
+	Write( SP, R2 )
+	
+	PC = PC + 1
+	Cycle = 16
+end
+
+local function StackPop()	
+	local R1 = Read( SP + 1 )
+	local R2 = Read( SP )
+	SP = SP + 2
+	
+	PC = PC + 1
+	Cycle = 12
+	return R1, R2
+end
+
+-- ARITHMATIC AND LOGIC
+
+local function ByteAdd(R1)
+	
+	Hf = ( band(A , 0xF) + band(R1 , 0xF)) > 0xF
+	
+	A = A + R1
+	Cf = A > 0xFF
+	
+	A = band(A , 0xFF)
+	
+	Nf = false
+	Zf = A == 0
+	
+	PC = PC + 1
+	Cycle = 4
+end
+
+local function ByteAdc(R1)
+
+	Hf = ( band(A , 0xF) + band(R1 , 0x0F) + (Cf and 1 or 0)) > 0xF
+	
+	A = A + R1 + (Cf and 1 or 0)
+	Cf = A > 0xFF
+	
+	A = band(A , 0xFF)
+	
+	Nf = false
+	Zf = A == 0
+	
+	PC = PC + 1
+	Cycle = 4
+end
+
+local function ByteSub(R1)
+	Hf = band(R1 , 0xF) > band(A , 0xF) 
+	Cf = R1 > A
+	
+	A = band( ( A - R1 ) , 0xFF )
+	
+	Zf = A == 0
+	Nf = true
+	
+	PC = PC + 1
+	Cycle = 4
+end
+
+
+local function ByteSbc(R1)
+
+	local SubVal = (R1 + (Cf and 1 or 0))
+
+	Hf = ( band(R1 , 0xF) + (Cf and 1 or 0) ) > band(A , 0xF)
+	Cf = SubVal > A
+	
+	A = band( ( A - SubVal ) , 0xFF)
+	
+	Zf = A == 0
+	Nf = true
+	
+	PC = PC + 1
+	Cycle = 4
+end
+
+
+local function ByteAnd(R1)
+	A = band( A, R1 )
+	
+	Zf = A == 0
+	Nf = false
+	Hf = true
+	Cf = false
+	
+	PC = PC + 1
+	Cycle = 4
+end
+
+local function ByteXor(R1)
+	A = bxor(A, R1)
+	
+	Zf = A == 0
+	Nf = false
+	Hf = false
+	Cf = false
+	
+	PC = PC + 1
+	cycle = 4
+end
+
+local function ByteOr(R1)
+	A = bor(A, R1)
+	
+	Zf = A == 0
+	Nf = false
+	Hf = false
+	Cf = false
+	
+	PC = PC + 1
+	cycle = 4
+end
+
+local function ByteCmp(R1)
+
+
+	Hf = band( R1 , 0xF ) > band( A , 0xF )
+	Cf = R1 > A
+	
+	Zf = band((A - R1) , 0xFF ) == 0
+	Nf = true
+	
+	PC = PC + 1
+	cycle = 4
+end
+
+
+-- Byte Inc and Dec
+local function ByteInc(R1)
+	Hf = band(R1 , 0xF) == 0xF
+	
+	R1 = band( (R1+1) , 0xFF )
+	
+	Nf = false
+	Zf = R1 == 0
+
+	PC = PC + 1
+
+	cycle = 4
+	
+	return R1
+end
+
+local function ByteDec(R1)
+	Hf = ( band((R1 - 1) , 0xF ) > band(R1 , 0xF))
+	
+	R1 = band( (R1-1) , 0xFF )
+	
+	Nf = true
+	Zf = R1 == 0
+	
+	PC = PC + 1
+	cycle = 4
+	
+	return R1
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+--- MISC/CONTROL INSTRUCTIONS ---
+
+-- NOP
+Operators[ 0x00 ] =  function()	
+	PC = PC + 1
+	Cycle = 4
+end
+
+-- STOP
+Operators[ 0x10 ] =  function()
+	Halt = true
+
+	PC = PC + 2
+	Cycle = 4
+	-- turns off the gameboy?
+end
+
+-- HALT
+Operators[ 0x76 ] = function()
+	if IME then
+		Halt = true
+	end
+	
+	PC = PC + 1
+	Cycle = 4
+end
+
+-- Disable Interupts
+Operators[ 0xF3 ] = function()
+	IME = false
+	
+	PC = PC + 1
+	Cycle = 4
+end
+
+--Enable Interupts
+Operators[ 0xFB ] = function()
+	IME = true
+	
+	PC = PC + 1
+	Cycle = 4
+end
+
+
+-- CB opcodes
+Operators[ 0xCB ] = function()
+	OperatorsCB[Read(PC + 1) ]()
+end
+
+
+
+--- JUMPS/CALLS/RETURNS/FLOW CONTROL GENERAL --- 
+
+
+-- Signed Jumps
+Operators[ 0x18 ] =  function() JumpSign( true ) end
+Operators[ 0x20 ] =  function() JumpSign( not Zf ) end
+Operators[ 0x30 ] =  function() JumpSign( not Cf ) end
+Operators[ 0x28 ] =  function() JumpSign( Zf ) end
+Operators[ 0x38 ] =  function() JumpSign( Cf ) end
+
+-- Absolute Jumps
+Operators[ 0xC3 ] =  function() Jump( true ) end
+Operators[ 0xC2 ] =  function() Jump( not Zf ) end
+Operators[ 0xD2 ] =  function() Jump( not Cf ) end
+Operators[ 0xCA ] =  function() Jump( Zf ) end
+Operators[ 0xDA ] =  function() Jump( Cf ) end
+
+-- Call Subroutine
+Operators[ 0xCD ] =  function() Call( true ) end
+Operators[ 0xC4 ] =  function() Call( not Zf ) end
+Operators[ 0xD4 ] =  function() Call( not Cf ) end
+Operators[ 0xCC ] =  function() Call( Zf ) end
+Operators[ 0xDC ] =  function() Call( Cf ) end
+
+-- Return from Subroutine
+Operators[ 0xC9 ] = function() Return( true ); Cycle = 16 end
+Operators[ 0xD9 ] = function() IME = true; Return( true ); Cycle = 16 end
+Operators[ 0xC0 ] = function() Return( not Zf ) end
+Operators[ 0xD0 ] = function() Return( not Cf ) end
+Operators[ 0xC8 ] = function() Return( Zf ) end
+Operators[ 0xD8 ] = function() Return( Cf ) end
+
+-- ResetPC
+Operators[ 0xC7 ] = function() ResetPC( 0x00 ) end
+Operators[ 0xD7 ] = function() ResetPC( 0x10 ) end
+Operators[ 0xE7 ] = function() ResetPC( 0x20 ) end
+Operators[ 0xF7 ] = function() ResetPC( 0x30 ) end
+
+Operators[ 0xCF ] = function() ResetPC( 0x08 ) end
+Operators[ 0xDF ] = function() ResetPC( 0x18 ) end
+Operators[ 0xEF ] = function() ResetPC( 0x28 ) end
+Operators[ 0xFF ] = function() ResetPC( 0x38 ) end
+
+-- Jump to address in HL
+
+Operators[ 0xE9 ] = function()
+	PC = bor( bshl( H, 8 ), L )
+	
+	Cycle = 4
+end
+
+--- 16 BIT ARITHMATIC & LOGIC ---
+
+-- Incrimnt 16 Bit Register
+Operators[ 0x03 ] =  function() C,B = WordInc(C,B) end
+Operators[ 0x13 ] =  function() E,D = WordInc(E,D) end
+Operators[ 0x23 ] =  function() L,H = WordInc(L,H) end
+Operators[ 0x33 ] =  function() SP = SP + 1; PC = PC + 1; Cycle = 8 end
+
+-- Decriment 16 Bit Register
+Operators[ 0x0B ] =  function() C,B = WordDec(C,B) end
+Operators[ 0x1B ] =  function() E,D = WordDec(E,D) end
+Operators[ 0x2B ] =  function() L,H = WordDec(L,H) end
+Operators[ 0x3B ] =  function() SP = SP - 1; PC = PC + 1; Cycle = 8 end
+
+--Add 16 Bit Register to HL
+Operators[ 0x09 ] =  function() WordAdd(B, C) end
+Operators[ 0x19 ] =  function() WordAdd(D, E) end
+Operators[ 0x29 ] =  function() WordAdd(H, L) end
+Operators[ 0x39 ] =  function() WordAdd( band( bshr(SP,8) , 0xFF) , band(SP , 0xFF) ) end -- Split the SP up first
+
+-- Add signed immediate to SP
+Operators[ 0xE8 ] =  function()
+	local D8 = Read(PC+1)
+	local S8 = band(D8, 127) - band(D8, 128)-- This turns a regular 8 bit unsigned number into a signed number. 
+	local tSP = SP + S8
+
+	if S8 >= 0 then
+		Cf = ( band(SP , 0xFF) + S8 ) > 0xFF
+		Hf = ( band(SP , 0xF) + band( S8 , 0xF ) ) > 0xF
+	else
+		Cf = band(tSP , 0xFF) <= band(SP , 0xFF)
+		Hf = band(tSP , 0xF)  <= band(SP , 0xF)
+	end
+
+	SP = band( tSP , 0xFFFF )
+
+	Zf = false
+	Nf = false
+
+	PC = PC + 2
+	Cycle = 16
+end
+
+
+
+-- Regular 8 bit loads
+
+-- Load into B
+Operators[ 0x40 ] =  function() B = B; Cycle = 4; PC = PC + 1 end
+Operators[ 0x41 ] =  function() B = C; Cycle = 4; PC = PC + 1 end
+Operators[ 0x42 ] =  function() B = D; Cycle = 4; PC = PC + 1 end
+Operators[ 0x43 ] =  function() B = E; Cycle = 4; PC = PC + 1 end
+Operators[ 0x44 ] =  function() B = H; Cycle = 4; PC = PC + 1 end
+Operators[ 0x45 ] =  function() B = L; Cycle = 4; PC = PC + 1 end
+Operators[ 0x46 ] =  function() B = Read( bor( bshl( H, 8 ), L ) ); Cycle = 8; PC = PC + 1 end
+Operators[ 0x47 ] =  function() B = A; Cycle = 4; PC = PC + 1 end
+
+-- Load into C
+Operators[ 0x48 ] =  function() C = B; Cycle = 4; PC = PC + 1 end
+Operators[ 0x49 ] =  function() C = C; Cycle = 4; PC = PC + 1 end
+Operators[ 0x4A ] =  function() C = D; Cycle = 4; PC = PC + 1 end
+Operators[ 0x4B ] =  function() C = E; Cycle = 4; PC = PC + 1 end
+Operators[ 0x4C ] =  function() C = H; Cycle = 4; PC = PC + 1 end
+Operators[ 0x4D ] =  function() C = L; Cycle = 4; PC = PC + 1 end
+Operators[ 0x4E ] =  function() C = Read( bor( bshl( H, 8 ), L ) ); Cycle = 8; PC = PC + 1 end
+Operators[ 0x4F ] =  function() C = A; Cycle = 4; PC = PC + 1 end
+
+-- Load into D
+Operators[ 0x50 ] =  function() D = B; Cycle = 4; PC = PC + 1 end
+Operators[ 0x51 ] =  function() D = C; Cycle = 4; PC = PC + 1 end
+Operators[ 0x52 ] =  function() D = D; Cycle = 4; PC = PC + 1 end
+Operators[ 0x53 ] =  function() D = E; Cycle = 4; PC = PC + 1 end
+Operators[ 0x54 ] =  function() D = H; Cycle = 4; PC = PC + 1 end
+Operators[ 0x55 ] =  function() D = L; Cycle = 4; PC = PC + 1 end
+Operators[ 0x56 ] =  function() D = Read( bor( bshl( H, 8 ), L ) ); Cycle = 8; PC = PC + 1 end
+Operators[ 0x57 ] =  function() D = A; Cycle = 4; PC = PC + 1 end
+
+-- Load into E
+Operators[ 0x58 ] =  function() E = B; Cycle = 4; PC = PC + 1 end
+Operators[ 0x59 ] =  function() E = C; Cycle = 4; PC = PC + 1 end
+Operators[ 0x5A ] =  function() E = D; Cycle = 4; PC = PC + 1 end
+Operators[ 0x5B ] =  function() E = E; Cycle = 4; PC = PC + 1 end
+Operators[ 0x5C ] =  function() E = H; Cycle = 4; PC = PC + 1 end
+Operators[ 0x5D ] =  function() E = L; Cycle = 4; PC = PC + 1 end
+Operators[ 0x5E ] =  function() E = Read( bor( bshl( H, 8 ), L ) ); Cycle = 8; PC = PC + 1 end
+Operators[ 0x5F ] =  function() E = A; Cycle = 4; PC = PC + 1 end
+
+-- Load into H
+Operators[ 0x60 ] =  function() H = B; Cycle = 4; PC = PC + 1 end
+Operators[ 0x61 ] =  function() H = C; Cycle = 4; PC = PC + 1 end
+Operators[ 0x62 ] =  function() H = D; Cycle = 4; PC = PC + 1 end
+Operators[ 0x63 ] =  function() H = E; Cycle = 4; PC = PC + 1 end
+Operators[ 0x64 ] =  function() H = H; Cycle = 4; PC = PC + 1 end
+Operators[ 0x65 ] =  function() H = L; Cycle = 4; PC = PC + 1 end
+Operators[ 0x66 ] =  function() H = Read( bor( bshl( H, 8 ), L ) ); Cycle = 8; PC = PC + 1 end
+Operators[ 0x67 ] =  function() H = A; Cycle = 4; PC = PC + 1 end
+
+-- Load into L
+Operators[ 0x68 ] =  function() L = B; Cycle = 4; PC = PC + 1 end
+Operators[ 0x69 ] =  function() L = C; Cycle = 4; PC = PC + 1 end
+Operators[ 0x6A ] =  function() L = D; Cycle = 4; PC = PC + 1 end
+Operators[ 0x6B ] =  function() L = E; Cycle = 4; PC = PC + 1 end
+Operators[ 0x6C ] =  function() L = H; Cycle = 4; PC = PC + 1 end
+Operators[ 0x6D ] =  function() L = L; Cycle = 4; PC = PC + 1 end
+Operators[ 0x6E ] =  function() L = Read( bor( bshl( H, 8 ), L ) ); Cycle = 8; PC = PC + 1 end
+Operators[ 0x6F ] =  function() L = A; Cycle = 4; PC = PC + 1 end
+
+-- Load into (HL)
+Operators[ 0x70 ] =  function() Write( bor( bshl( H, 8 ), L ), B); Cycle = 8; PC = PC + 1 end
+Operators[ 0x71 ] =  function() Write( bor( bshl( H, 8 ), L ), C); Cycle = 8; PC = PC + 1 end
+Operators[ 0x72 ] =  function() Write( bor( bshl( H, 8 ), L ), D); Cycle = 8; PC = PC + 1 end
+Operators[ 0x73 ] =  function() Write( bor( bshl( H, 8 ), L ), E); Cycle = 8; PC = PC + 1 end
+Operators[ 0x74 ] =  function() Write( bor( bshl( H, 8 ), L ), H); Cycle = 8; PC = PC + 1 end
+Operators[ 0x75 ] =  function() Write( bor( bshl( H, 8 ), L ), L); Cycle = 8; PC = PC + 1 end
+
+Operators[ 0x77 ] =  function() Write( bor( bshl( H, 8 ), L ), A); Cycle = 8; PC = PC + 1 end
+
+-- Load into A
+Operators[ 0x78 ] =  function() A = B; Cycle = 4; PC = PC + 1 end
+Operators[ 0x79 ] =  function() A = C; Cycle = 4; PC = PC + 1 end
+Operators[ 0x7A ] =  function() A = D; Cycle = 4; PC = PC + 1 end
+Operators[ 0x7B ] =  function() A = E; Cycle = 4; PC = PC + 1 end
+Operators[ 0x7C ] =  function() A = H; Cycle = 4; PC = PC + 1 end
+Operators[ 0x7D ] =  function() A = L; Cycle = 4; PC = PC + 1 end
+Operators[ 0x7E ] =  function() A = Read( bor( bshl( H, 8 ), L )); Cycle = 8; PC = PC + 1 end
+Operators[ 0x7F ] =  function() A = A; Cycle = 4; PC = PC + 1 end
+
+
+-- Load immediate data into register
+Operators[ 0x06 ] =  function() B = Read(PC+1); Cycle = 8; PC = PC + 2 end
+Operators[ 0x0E ] =  function() C = Read(PC+1); Cycle = 8; PC = PC + 2 end
+Operators[ 0x16 ] =  function() D = Read(PC+1); Cycle = 8; PC = PC + 2 end
+Operators[ 0x1E ] =  function() E = Read(PC+1); Cycle = 8; PC = PC + 2 end
+Operators[ 0x26 ] =  function() H = Read(PC+1); Cycle = 8; PC = PC + 2 end
+Operators[ 0x2E ] =  function() L = Read(PC+1); Cycle = 8; PC = PC + 2 end
+Operators[ 0x36 ] =  function() Write( bor( bshl( H, 8 ), L ), Read(PC+1)); Cycle = 12; PC = PC + 2 end
+Operators[ 0x3E ] =  function() A = Read(PC+1); Cycle = 8; PC = PC + 2 end
+
+-- The wierd 8 bit loads
+-- Load A into 0xFF00 + immediate data or visa-versa
+Operators[ 0xE0 ] = function() Write( 0xFF00 + Read(PC+1), A); Cycle = 12; PC = PC + 2 end
+Operators[ 0xF0 ] = function() A = Read( 0xFF00 + Read(PC+1)); Cycle = 12; PC = PC + 2 end
+
+-- Load A into 0xFF + C or visa-versa. 
+Operators[ 0xE2 ] = function() Write( 0xFF00 + C, A ); Cycle = 8; PC = PC + 1 end
+Operators[ 0xF2 ] = function() A = Read( 0xFF00 + C ); Cycle = 8; PC = PC + 1 end
+
+-- Load A into immediate addres (A16) or visa-versa
+Operators[ 0xEA ] = function()
+	local A16 = bor( bshl(Read(PC+2), 8), Read(PC+1) )
+	Write( A16, A)
+	
+	Cycle = 16
+	PC = PC + 3
+end
+
+Operators[ 0xFA ] = function()
+	local A16 = bor( bshl(Read(PC+2), 8), Read(PC+1) )
+
+	A = Read( A16 )
+	
+	Cycle = 16
+	PC = PC + 3
+end
+
+Operators[ 0x02 ] = function()
+	local A16 = bor( bshl( B, 8 ), C )
+	Write( A16, A )
+
+	Cycle = 8
+	PC = PC + 1
+end
+
+Operators[ 0x12 ] = function()
+	local A16 = bor( bshl( D, 8 ), E )
+	Write( A16, A )
+
+	Cycle = 8
+	PC = PC + 1
+end
+
+Operators[ 0x22 ] = function()
+	local A16 = bor( bshl( H, 8 ), L )
+	Write( A16, A )
+
+	L = L + 1
+	if L > 0xFF then
+		L = band( L , 0xFF )
+		H = band( (H + 1) , 0xFF )
+	end
+
+
+	Cycle = 8
+	PC = PC + 1
+end
+
+Operators[ 0x32 ] = function()
+	local A16 = bor( bshl( H, 8 ), L )
+	Write( A16, A )
+
+	L = L - 1
+	if L < 0 then
+		L = band( L , 0xFF )
+		H = band( (H - 1) , 0xFF )
+	end
+
+	Cycle = 8
+	PC = PC + 1
+end
+
+
+Operators[ 0x0A ] = function()
+	local A16 = bor( bshl( B, 8 ), C )
+	A = Read( A16 )
+
+	Cycle = 8
+	PC = PC + 1
+end
+
+Operators[ 0x1A ] = function()
+	local A16 = bor( bshl( D, 8 ), E )
+	A = Read( A16 )
+
+	Cycle = 8
+	PC = PC + 1
+end
+
+Operators[ 0x2A ] = function()
+
+	A = Read( bor( bshl( H, 8 ), L ) )
+
+	L = L + 1
+	if L > 0xFF then
+		L = band(L , 0xFF)
+		H = band( (H + 1) , 0xFF )
+	end
+
+	Cycle = 8
+	PC = PC + 1
+end
+
+Operators[ 0x3A ] = function()
+
+	A = Read( bor( bshl( H, 8 ), L ) )
+
+	L = L - 1
+	if L < 0 then
+		L = band(L , 0xFF)
+		H = band( (H - 1) , 0xFF )
+	end
+
+	Cycle = 8
+	PC = PC + 1
+end
+
+
+
+--- 8 Bit Arithmatic and Logic ---
+
+-- ADD
+Operators[ 0x80 ] = function() ByteAdd(B) end
+Operators[ 0x81 ] = function() ByteAdd(C) end
+Operators[ 0x82 ] = function() ByteAdd(D) end
+Operators[ 0x83 ] = function() ByteAdd(E) end
+Operators[ 0x84 ] = function() ByteAdd(H) end
+Operators[ 0x85 ] = function() ByteAdd(L) end
+Operators[ 0x86 ] = function() ByteAdd( Read( bor( bshl( H, 8 ), L ) ) ); Cycle = 8 end
+Operators[ 0x87 ] = function() ByteAdd(A) end
+
+-- ADD with Carry (ADC)
+Operators[ 0x88 ] = function() ByteAdc(B) end
+Operators[ 0x89 ] = function() ByteAdc(C) end
+Operators[ 0x8A ] = function() ByteAdc(D) end
+Operators[ 0x8B ] = function() ByteAdc(E) end
+Operators[ 0x8C ] = function() ByteAdc(H) end
+Operators[ 0x8D ] = function() ByteAdc(L) end
+Operators[ 0x8E ] = function() ByteAdc( Read( bor( bshl( H, 8 ), L ) ) ); Cycle = 8 end
+Operators[ 0x8F ] = function() ByteAdc(A) end
+
+-- SUB
+Operators[ 0x90 ] = function() ByteSub(B) end
+Operators[ 0x91 ] = function() ByteSub(C) end
+Operators[ 0x92 ] = function() ByteSub(D) end
+Operators[ 0x93 ] = function() ByteSub(E) end
+Operators[ 0x94 ] = function() ByteSub(H) end
+Operators[ 0x95 ] = function() ByteSub(L) end
+Operators[ 0x96 ] = function() ByteSub( Read( bor( bshl( H, 8 ), L ) ) ); Cycle = 8 end
+Operators[ 0x97 ] = function() ByteSub(A) end
+
+-- SUB with Borrow (ABC)
+Operators[ 0x98 ] = function() ByteSbc(B) end
+Operators[ 0x99 ] = function() ByteSbc(C) end
+Operators[ 0x9A ] = function() ByteSbc(D) end
+Operators[ 0x9B ] = function() ByteSbc(E) end
+Operators[ 0x9C ] = function() ByteSbc(H) end
+Operators[ 0x9D ] = function() ByteSbc(L) end
+Operators[ 0x9E ] = function() ByteSbc( Read( bor( bshl( H, 8 ), L ) ) ); Cycle = 8 end
+Operators[ 0x9F ] = function() ByteSbc(A) end
+
+-- AND
+Operators[ 0xA0 ] = function() ByteAnd(B) end
+Operators[ 0xA1 ] = function() ByteAnd(C) end
+Operators[ 0xA2 ] = function() ByteAnd(D) end
+Operators[ 0xA3 ] = function() ByteAnd(E) end
+Operators[ 0xA4 ] = function() ByteAnd(H) end
+Operators[ 0xA5 ] = function() ByteAnd(L) end
+Operators[ 0xA6 ] = function() ByteAnd( Read( bor( bshl( H, 8 ), L ) ) ); Cycle = 8 end
+Operators[ 0xA7 ] = function() ByteAnd(A) end
+
+-- XOR
+Operators[ 0xA8 ] = function() ByteXor(B) end
+Operators[ 0xA9 ] = function() ByteXor(C) end
+Operators[ 0xAA ] = function() ByteXor(D) end
+Operators[ 0xAB ] = function() ByteXor(E) end
+Operators[ 0xAC ] = function() ByteXor(H) end
+Operators[ 0xAD ] = function() ByteXor(L) end
+Operators[ 0xAE ] = function() ByteXor( Read( bor( bshl( H, 8 ), L ) ) ); Cycle = 8 end
+Operators[ 0xAF ] = function() ByteXor(A) end
+
+-- OR
+Operators[ 0xB0 ] = function() ByteOr(B) end
+Operators[ 0xB1 ] = function() ByteOr(C) end
+Operators[ 0xB2 ] = function() ByteOr(D) end
+Operators[ 0xB3 ] = function() ByteOr(E) end
+Operators[ 0xB4 ] = function() ByteOr(H) end
+Operators[ 0xB5 ] = function() ByteOr(L) end
+Operators[ 0xB6 ] = function() ByteOr( Read( bor( bshl( H, 8 ), L ) ) ); Cycle = 8 end
+Operators[ 0xB7 ] = function() ByteOr(A) end
+
+-- CMP
+Operators[ 0xB8 ] = function() ByteCmp(B) end
+Operators[ 0xB9 ] = function() ByteCmp(C) end
+Operators[ 0xBA ] = function() ByteCmp(D) end
+Operators[ 0xBB ] = function() ByteCmp(E) end
+Operators[ 0xBC ] = function() ByteCmp(H) end
+Operators[ 0xBD ] = function() ByteCmp(L) end
+Operators[ 0xBE ] = function() ByteCmp( Read( bor( bshl( H, 8 ), L ) ) ); Cycle = 8 end
+Operators[ 0xBF ] = function() ByteCmp(A) end
+
+
+-- All of the above but on immediate data
+Operators[ 0xC6 ] = function() ByteAdd( Read(PC+1) ); Cycle = 8; PC = PC + 1 end
+Operators[ 0xD6 ] = function() ByteSub( Read(PC+1) ); Cycle = 8; PC = PC + 1 end
+Operators[ 0xE6 ] = function() ByteAnd( Read(PC+1) ); Cycle = 8; PC = PC + 1 end
+Operators[ 0xF6 ] = function() ByteOr( Read(PC+1) ); Cycle = 8; PC = PC + 1 end
+
+Operators[ 0xCE ] = function() ByteAdc( Read(PC+1) ); Cycle = 8; PC = PC + 1 end
+Operators[ 0xDE ] = function() ByteSbc( Read(PC+1) ); Cycle = 8; PC = PC + 1 end
+Operators[ 0xEE ] = function() ByteXor( Read(PC+1) ); Cycle = 8; PC = PC + 1 end
+Operators[ 0xFE ] = function() ByteCmp( Read(PC+1) ); Cycle = 8; PC = PC + 1 end
+
+
+-- Bitwise not on A
+Operators[ 0x2F ] = function()
+	A = 255-A
+	
+	Hf = true
+	Nf = true
+	
+	PC = PC + 1
+	Cycle = 4
+end
+
+
+
+-- Byte Incriment
+
+Operators[ 0x04 ] = function() B = ByteInc(B) end
+Operators[ 0x0C ] = function() C = ByteInc(C) end
+Operators[ 0x14 ] = function() D = ByteInc(D) end
+Operators[ 0x1C ] = function() E = ByteInc(E) end
+Operators[ 0x24 ] = function() H = ByteInc(H) end
+Operators[ 0x2C ] = function() L = ByteInc(L) end
+Operators[ 0x34 ] = function()
+	local R1 = Read( bor( bshl( H, 8 ), L ) )
+	local R1 = ByteInc(R1)
+	Write( bor( bshl( H, 8 ), L ), R1 )
+	
+	Cycle = 12
+end
+Operators[ 0x3C ] = function() A = ByteInc(A) end
+
+
+-- Byte Decriment
+
+Operators[ 0x05 ] = function() B = ByteDec(B) end
+Operators[ 0x0D ] = function() C = ByteDec(C) end
+Operators[ 0x15 ] = function() D = ByteDec(D) end
+Operators[ 0x1D ] = function() E = ByteDec(E) end
+Operators[ 0x25 ] = function() H = ByteDec(H) end
+Operators[ 0x2D ] = function() L = ByteDec(L) end
+Operators[ 0x35 ] = function()
+	local R1 = Read( bor( bshl( H, 8 ), L ) )
+	local R1 = ByteDec(R1)
+	Write( bor( bshl( H, 8 ), L ), R1 )
+	
+	Cycle = 12
+end
+Operators[ 0x3D ] = function() A = ByteDec(A) end
+
+
+
+
+
+-- STACK PUSH
+Operators[ 0xC5 ] = function() StackPush(B, C) end
+Operators[ 0xD5 ] = function() StackPush(D, E) end
+Operators[ 0xE5 ] = function() StackPush(H, L) end
+Operators[ 0xF5 ] = function()
+	F = 0
+	if Cf then F = bor(F, 16) end
+	if Hf then F = bor(F, 32) end
+	if Nf then F = bor(F, 64) end
+	if Zf then F = bor(F, 128) end
+	
+	StackPush(A, F)
+end
+
+-- STACK POP
+Operators[ 0xC1 ] = function() B, C = StackPop() end
+Operators[ 0xD1 ] = function() D, E = StackPop() end
+Operators[ 0xE1 ] = function() H, L = StackPop() end
+Operators[ 0xF1 ] = function()
+	A, F = StackPop()
+	
+	if band(F, 16) == 16 then Cf = true else Cf = false end
+	if band(F, 32) == 32 then Hf = true else Hf = false end
+	if band(F, 64) == 64 then Nf = true else Nf = false end
+	if band(F, 128) == 128 then Zf = true else Zf = false end
+end
+
+
+-- 16 bit load immediate
+
+Operators[ 0x01 ] = function() 
+	B = Read(PC + 2)
+	C = Read(PC + 1)
+	
+	PC = PC + 3
+	Cycle = 12
+end
+
+Operators[ 0x11 ] = function() 
+	D = Read(PC + 2)
+	E = Read(PC + 1)
+	
+	PC = PC + 3
+	Cycle = 12
+end
+
+Operators[ 0x21 ] = function() 
+	H = Read(PC + 2)
+	L = Read(PC + 1)
+	
+	PC = PC + 3
+	Cycle = 12
+end
+
+Operators[ 0x31 ] = function() 
+	SP = bor( bshl( Read( PC + 2 ) , 8 ) , Read(PC + 1) )
+	
+	PC = PC + 3
+	Cycle = 12
+end
+
+
+-- Save SP at 16 bit immeiate address
+Operators[ 0x08 ] = function() 
+
+	local A16 = bor( bshl( Read( PC + 2 ) , 8 ) , Read(PC + 1) )
+	local SPhi = bshr( band(SP, 0xFF00), 8 )
+	local SPlo = band(SP , 0xFF )
+	
+	Write(A16,SPlo)
+	Write(A16+1,SPhi)
+	
+	Cycle = 20
+	PC = PC + 3
+end
+
+-- Load SP + signed immediate into HL
+Operators[ 0xF8 ] = function() 
+	local D8 = Read(PC+1)
+	local S8 = ( band(D8, 127) - band(D8, 128))
+	local tSP = SP + S8 
+	
+	if S8 >= 0 then
+		Cf = ( band(SP , 0xFF) + ( S8 ) ) > 0xFF
+		Hf = ( band(SP , 0xF) + band( S8 , 0xF ) ) > 0xF
+	else
+		Cf = band(tSP , 0xFF) <= band(SP , 0xFF)
+		Hf = band(tSP , 0xF) <= band(SP , 0xF)
+	end
+
+	Zf = false
+	Nf = false
+	
+	H = bshr( band( tSP , 0xFF00), 8 )
+	L = band( tSP , 0xFF )
+	
+	Cycle = 12
+	PC = PC + 2
+end
+
+-- Load HL into SP
+Operators[ 0xF9 ] = function() 
+	SP = bor( bshl( H, 8 ), L )
+	
+	Cycle = 8
+	PC = PC + 1
+end
+
+
+-- Carry Operations
+Operators[ 0x37 ] = function() 
+	Cf = true
+	Hf = false
+	Nf = false
+	
+	PC = PC + 1
+	Cycle = 4
+end
+
+Operators[ 0x3F ] = function() 
+
+	Cf = not Cf
+	Hf = false
+	Nf = false
+	
+	PC = PC + 1
+	Cycle = 4
+end
+
+-- DAA, this one is a bitch, credit to blarrg
+Operators[ 0x27 ] = function() 
+
+
+	if Nf then
+
+		if Hf then A = band( A - 6, 0xFF ) end
+
+		if Cf then A = A - 0x60 end
+
+	else
+
+		if band(A , 0xF) > 9 or Hf then A = (A + 0x06) end
+		
+		if A > 0x9F or Cf then A = (A + 0x60) end
+
+	end
+
+	--Cf = A > 0xFF
+
+	Hf = false
+	Zf = false
+
+	if A > 0xFF then
+		Cf = true
+	end
+
+	A = band(A, 0xFF)
+
+	if A == 0 then
+		Zf = true
+	end
+
+
+	
+	PC = PC + 1
+	Cycle = 4
+end
+
+
+--- ROTATES
+
+Operators[ 0x17 ] = function() 
+	local Bit7 = band( A, 128 ) == 128
+	
+	A = bor( band( bshl(A, 1) , 0xFF) , (Cf and 1 or 0) )
+
+	Cf = Bit7
+	Zf = false
+	Nf = false
+	Hf = false
+
+	PC = PC + 1
+	Cycle = 4
+
+end
+
+Operators[ 0x1F ] = function()
+	local Bit0 = band( A, 1 ) == 1
+
+	A = bor( band( bshr(A, 1) , 0xFF) , (Cf and 128 or 0) )
+
+	Cf = Bit0
+	Zf = false
+	Nf = false
+	Hf = false
+
+	PC = PC + 1
+	Cycle = 4
+end
+
+Operators[ 0x07 ] = function()
+	local Bit7 = band( A, 128 ) == 128
+
+	A = bor( band( bshl(A, 1) , 0xFF) , ( Bit7 and 1 or 0) )
+
+	Cf = Bit7
+	Zf = false
+	Nf = false
+	Hf = false
+
+	PC = PC + 1
+	Cycle = 4
+end
+
+Operators[ 0x0F ] = function()
+	local Bit0 = band( A, 1 ) == 1
+
+	A = bor( band( bshr(A, 1) , 0xFF) , (Bit0 and 128 or 0) )
+
+	Cf = Bit0
+	Zf = false
+	Nf = false
+	Hf = false
+
+	PC = PC + 1
+	Cycle = 4
+end
+
+
+OperatorsCB = {}
+
+local band = bit.band
+local bor = bit.bor
+local bxor = bit.bxor
+local bshr = bit.rshift
+local bshl = bit.lshift
+
+local function HL()
+	return bor( bshl( H, 8 ), L )
+end
+
+
+--- BIT FUNCTIONS ---
+local function SetBit(R1,N)
+	local Bit = bshl(1, N)
+	R1 = bor( R1, Bit )
+	
+	PC = PC + 2
+	Cycle = 8
+	return R1
+end
+
+function RstBit(R1,N)
+
+	local Bit = bshl(1, N)
+	R1 = band( R1, (255-Bit) )
+	
+	PC = PC + 2
+	Cycle = 8
+	return R1
+end
+
+function TstBit(R1,N)
+	local Bit = bshl(1, N)
+	local test = band(R1, Bit)
+	
+	Nf = false
+	Hf = true
+	Zf = test == 0
+	
+	PC = PC + 2
+	Cycle = 8
+end
+
+function RotateLeftCarry(R1
+)
+	local Bit7 = band(R1, 128) == 128
+	
+	R1 = bor( band( bshl(R1, 1) , 0xFE) , (Bit7 and 1 or 0) )
+
+	Cf = Bit7
+	Zf = R1 == 0
+	Nf = false
+	Hf = false
+	
+	PC = PC + 2
+	Cycle = 8
+	
+	return R1
+end
+
+function RotateRightCarry(R1)
+	local Bit0 = band(R1, 1) == 1
+	
+	R1 = bor( band( bshr(R1, 1) , 0xFF) , (Bit0 and 128 or 0) )
+
+	Cf = Bit0
+	Zf = R1 == 0
+	Nf = false
+	Hf = false
+	
+	PC = PC + 2
+	Cycle = 8
+	
+	return R1
+end
+
+function RotateLeft(R1)
+	local Bit7 = band(R1, 128) == 128
+
+	R1 = bor( band( bshl(R1, 1) , 0xFE) , (Cf and 1 or 0) )
+
+	Cf = Bit7
+	Zf = R1 == 0
+
+	Nf = false
+	Hf = false
+
+	PC = PC + 2
+	Cycle = 8
+
+	return R1
+	
+end
+
+function RotateRight(R1)
+	local Bit0 = band(R1, 1) == 1
+	
+	R1 = bor( band( bshr(R1, 1) , 0xFF) , (Cf and 128 or 0) )
+	
+	Nf = false
+	Hf = false
+	
+	Cf = Bit0
+	Zf = R1 == 0
+	
+	PC = PC + 2
+	Cycle = 8
+	
+	return R1
+end
+
+function ArithmaticShiftLeft(R1)
+
+	local Bit7 = band( R1, 128 ) == 128
+
+	R1 = band( bshl(R1, 1) , 0xFE ) --- 0xFE for a reason, this is arithmatic shift.
+
+	Cf = Bit7
+	Zf = R1 == 0
+	Hf = false
+	Nf = false
+
+	PC = PC + 2
+	Cycle = 8
+
+	return R1
+end
+
+function ArithmaticShiftRight(R1)
+
+	local Bit7 = band( R1, 128 ) == 128
+	local Bit0 = band( R1, 1 )   == 1
+
+	R1 = bor (band( bshr(R1, 1) , 0xFF ) , (Bit7 and 128 or 0))
+
+	Cf = Bit0
+	Zf = R1 == 0
+	Hf = false
+	Nf = false
+
+	PC = PC + 2
+	Cycle = 8
+
+	return R1
+end
+
+function ShiftRight(R1)
+
+	local Bit0 = band( R1, 1 ) == 1
+
+	R1 = band( bshr(R1, 1) , 0xFF )
+
+	Cf = Bit0
+	Zf = R1 == 0
+	Hf = false
+	Nf = false
+
+	Cycle = 8
+	PC = PC + 2
+
+	return R1
+end
+
+function Swap(R1)
+
+	R1 = bshr( band(R1 , 0xF0) , 4) + bshl( band(R1 , 0x0F) , 4) 
+
+	Zf = R1 == 0
+	Cf = false
+	Hf = false
+	Nf = false
+
+	Cycle = 8
+	PC = PC + 2
+
+	return R1
+end
+
+
+
+	
+
+
+----------------------------------------------------------------------------------------------------------
+-- CB CB CB -- CB CB CB -- CB CB CB -- CB CB CB -- CB CB CB -- CB CB CB -- CB CB CB -- CB CB CB --
+ 
+--Operators[ 0xBE ] = function() ByteCmp( Read( HL() ) ); Cycle = 8 end
+
+
+-- Rotate Left with Carry
+OperatorsCB[ 0x00 ] = function() B = RotateLeftCarry( B ) end
+OperatorsCB[ 0x01 ] = function() C = RotateLeftCarry( C ) end
+OperatorsCB[ 0x02 ] = function() D = RotateLeftCarry( D ) end
+OperatorsCB[ 0x03 ] = function() E = RotateLeftCarry( E ) end
+OperatorsCB[ 0x04 ] = function() H = RotateLeftCarry( H ) end
+OperatorsCB[ 0x05 ] = function() L = RotateLeftCarry( L ) end
+OperatorsCB[ 0x06 ] = function() Write( HL() , RotateLeftCarry( Read( HL() ) ) ); Cycle = 16 end
+OperatorsCB[ 0x07 ] = function() A = RotateLeftCarry( A ) end
+
+-- Rotate Right with Carry
+OperatorsCB[ 0x08 ] = function() B = RotateRightCarry( B ) end
+OperatorsCB[ 0x09 ] = function() C = RotateRightCarry( C ) end
+OperatorsCB[ 0x0A ] = function() D = RotateRightCarry( D ) end
+OperatorsCB[ 0x0B ] = function() E = RotateRightCarry( E ) end
+OperatorsCB[ 0x0C ] = function() H = RotateRightCarry( H ) end
+OperatorsCB[ 0x0D ] = function() L = RotateRightCarry( L ) end
+OperatorsCB[ 0x0E ] = function() Write( HL() , RotateRightCarry( Read( HL() ) ) ); Cycle = 16 end
+OperatorsCB[ 0x0F ] = function() A = RotateRightCarry( A ) end
+
+-- Rotate Left
+OperatorsCB[ 0x10 ] = function() B = RotateLeft( B ) end
+OperatorsCB[ 0x11 ] = function() C = RotateLeft( C ) end
+OperatorsCB[ 0x12 ] = function() D = RotateLeft( D ) end
+OperatorsCB[ 0x13 ] = function() E = RotateLeft( E ) end
+OperatorsCB[ 0x14 ] = function() H = RotateLeft( H ) end
+OperatorsCB[ 0x15 ] = function() L = RotateLeft( L ) end
+OperatorsCB[ 0x16 ] = function() Write( HL() , RotateLeft( Read( HL() ) ) ); Cycle = 16 end
+OperatorsCB[ 0x17 ] = function() A = RotateLeft( A ) end
+
+-- Rotate Right
+OperatorsCB[ 0x18 ] = function() B = RotateRight( B ) end
+OperatorsCB[ 0x19 ] = function() C = RotateRight( C ) end
+OperatorsCB[ 0x1A ] = function() D = RotateRight( D ) end
+OperatorsCB[ 0x1B ] = function() E = RotateRight( E ) end
+OperatorsCB[ 0x1C ] = function() H = RotateRight( H ) end
+OperatorsCB[ 0x1D ] = function() L = RotateRight( L ) end
+OperatorsCB[ 0x1E ] = function() Write( HL() , RotateRight( Read( HL() ) ) ); Cycle = 16 end
+OperatorsCB[ 0x1F ] = function() A = RotateRight( A ) end
+
+--Arithmatic Shift Left
+OperatorsCB[ 0x20 ] = function() B = ArithmaticShiftLeft( B ) end
+OperatorsCB[ 0x21 ] = function() C = ArithmaticShiftLeft( C ) end
+OperatorsCB[ 0x22 ] = function() D = ArithmaticShiftLeft( D ) end
+OperatorsCB[ 0x23 ] = function() E = ArithmaticShiftLeft( E ) end
+OperatorsCB[ 0x24 ] = function() H = ArithmaticShiftLeft( H ) end
+OperatorsCB[ 0x25 ] = function() L = ArithmaticShiftLeft( L ) end
+OperatorsCB[ 0x26 ] = function() Write( HL() , ArithmaticShiftLeft( Read( HL() ) ) ); Cycle = 16 end
+OperatorsCB[ 0x27 ] = function() A = ArithmaticShiftLeft( A ) end
+
+--Arithmatic Shift Right
+OperatorsCB[ 0x28 ] = function() B = ArithmaticShiftRight( B ) end
+OperatorsCB[ 0x29 ] = function() C = ArithmaticShiftRight( C ) end
+OperatorsCB[ 0x2A ] = function() D = ArithmaticShiftRight( D ) end
+OperatorsCB[ 0x2B ] = function() E = ArithmaticShiftRight( E ) end
+OperatorsCB[ 0x2C ] = function() H = ArithmaticShiftRight( H ) end
+OperatorsCB[ 0x2D ] = function() L = ArithmaticShiftRight( L ) end
+OperatorsCB[ 0x2E ] = function() Write( HL() , ArithmaticShiftRight( Read( HL() ) ) ); Cycle = 16 end
+OperatorsCB[ 0x2F ] = function() A = ArithmaticShiftRight( A ) end
+
+--Swap
+OperatorsCB[ 0x30 ] = function() B = Swap( B ) end
+OperatorsCB[ 0x31 ] = function() C = Swap( C ) end
+OperatorsCB[ 0x32 ] = function() D = Swap( D ) end
+OperatorsCB[ 0x33 ] = function() E = Swap( E ) end
+OperatorsCB[ 0x34 ] = function() H = Swap( H ) end
+OperatorsCB[ 0x35 ] = function() L = Swap( L ) end
+OperatorsCB[ 0x36 ] = function() Write( HL() , Swap( Read( HL() ) ) ); Cycle = 16 end
+OperatorsCB[ 0x37 ] = function() A = Swap( A ) end
+
+--ShiftRight
+OperatorsCB[ 0x38 ] = function() B = ShiftRight( B ) end
+OperatorsCB[ 0x39 ] = function() C = ShiftRight( C ) end
+OperatorsCB[ 0x3A ] = function() D = ShiftRight( D ) end
+OperatorsCB[ 0x3B ] = function() E = ShiftRight( E ) end
+OperatorsCB[ 0x3C ] = function() H = ShiftRight( H ) end
+OperatorsCB[ 0x3D ] = function() L = ShiftRight( L ) end
+OperatorsCB[ 0x3E ] = function() Write( HL() , ShiftRight( Read( HL() ) ) ); Cycle = 16 end
+OperatorsCB[ 0x3F ] = function() A = ShiftRight( A ) end
+
+
+
+
+
+
+
+-- TEST BIT aka BIT
+OperatorsCB[ 0x40 ] = function() TstBit( B ,0 ) end
+OperatorsCB[ 0x41 ] = function() TstBit( C ,0 ) end
+OperatorsCB[ 0x42 ] = function() TstBit( D ,0 ) end
+OperatorsCB[ 0x43 ] = function() TstBit( E ,0 ) end
+OperatorsCB[ 0x44 ] = function() TstBit( H ,0 ) end
+OperatorsCB[ 0x45 ] = function() TstBit( L ,0 ) end
+OperatorsCB[ 0x46 ] = function() TstBit( Read( HL() ) ,0 ); Cycle = 16 end
+OperatorsCB[ 0x47 ] = function() TstBit( A ,0 ) end
+
+OperatorsCB[ 0x48 ] = function() TstBit( B ,1 ) end
+OperatorsCB[ 0x49 ] = function() TstBit( C ,1 ) end
+OperatorsCB[ 0x4A ] = function() TstBit( D ,1 ) end
+OperatorsCB[ 0x4B ] = function() TstBit( E ,1 ) end
+OperatorsCB[ 0x4C ] = function() TstBit( H ,1 ) end
+OperatorsCB[ 0x4D ] = function() TstBit( L ,1 ) end
+OperatorsCB[ 0x4E ] = function() TstBit( Read( HL() ) ,1 ); Cycle = 16 end
+OperatorsCB[ 0x4F ] = function() TstBit( A ,1 ) end
+
+OperatorsCB[ 0x50 ] = function() TstBit( B ,2 ) end
+OperatorsCB[ 0x51 ] = function() TstBit( C ,2 ) end
+OperatorsCB[ 0x52 ] = function() TstBit( D ,2 ) end
+OperatorsCB[ 0x53 ] = function() TstBit( E ,2 ) end
+OperatorsCB[ 0x54 ] = function() TstBit( H ,2 ) end
+OperatorsCB[ 0x55 ] = function() TstBit( L ,2 ) end
+OperatorsCB[ 0x56 ] = function() TstBit( Read( HL() ) ,2 ); Cycle = 16 end
+OperatorsCB[ 0x57 ] = function() TstBit( A ,2 ) end
+
+OperatorsCB[ 0x58 ] = function() TstBit( B ,3 ) end
+OperatorsCB[ 0x59 ] = function() TstBit( C ,3 ) end
+OperatorsCB[ 0x5A ] = function() TstBit( D ,3 ) end
+OperatorsCB[ 0x5B ] = function() TstBit( E ,3 ) end
+OperatorsCB[ 0x5C ] = function() TstBit( H ,3 ) end
+OperatorsCB[ 0x5D ] = function() TstBit( L ,3 ) end
+OperatorsCB[ 0x5E ] = function() TstBit( Read( HL() ) ,3 ); Cycle = 16 end
+OperatorsCB[ 0x5F ] = function() TstBit( A ,3 ) end
+
+OperatorsCB[ 0x60 ] = function() TstBit( B ,4 ) end
+OperatorsCB[ 0x61 ] = function() TstBit( C ,4 ) end
+OperatorsCB[ 0x62 ] = function() TstBit( D ,4 ) end
+OperatorsCB[ 0x63 ] = function() TstBit( E ,4 ) end
+OperatorsCB[ 0x64 ] = function() TstBit( H ,4 ) end
+OperatorsCB[ 0x65 ] = function() TstBit( L ,4 ) end
+OperatorsCB[ 0x66 ] = function() TstBit( Read( HL() ) ,4 ); Cycle = 16 end
+OperatorsCB[ 0x67 ] = function() TstBit( A ,4 ) end
+
+OperatorsCB[ 0x68 ] = function() TstBit( B ,5 ) end
+OperatorsCB[ 0x69 ] = function() TstBit( C ,5 ) end
+OperatorsCB[ 0x6A ] = function() TstBit( D ,5 ) end
+OperatorsCB[ 0x6B ] = function() TstBit( E ,5 ) end
+OperatorsCB[ 0x6C ] = function() TstBit( H ,5 ) end
+OperatorsCB[ 0x6D ] = function() TstBit( L ,5 ) end
+OperatorsCB[ 0x6E ] = function() TstBit( Read( HL() ) ,5 ); Cycle = 16 end
+OperatorsCB[ 0x6F ] = function() TstBit( A ,5 ) end
+
+OperatorsCB[ 0x70 ] = function() TstBit( B ,6 ) end
+OperatorsCB[ 0x71 ] = function() TstBit( C ,6 ) end
+OperatorsCB[ 0x72 ] = function() TstBit( D ,6 ) end
+OperatorsCB[ 0x73 ] = function() TstBit( E ,6 ) end
+OperatorsCB[ 0x74 ] = function() TstBit( H ,6 ) end
+OperatorsCB[ 0x75 ] = function() TstBit( L ,6 ) end
+OperatorsCB[ 0x76 ] = function() TstBit( Read( HL() ) ,6 ); Cycle = 16 end
+OperatorsCB[ 0x77 ] = function() TstBit( A ,6 ) end
+
+OperatorsCB[ 0x78 ] = function() TstBit( B ,7 ) end
+OperatorsCB[ 0x79 ] = function() TstBit( C ,7 ) end
+OperatorsCB[ 0x7A ] = function() TstBit( D ,7 ) end
+OperatorsCB[ 0x7B ] = function() TstBit( E ,7 ) end
+OperatorsCB[ 0x7C ] = function() TstBit( H ,7 ) end
+OperatorsCB[ 0x7D ] = function() TstBit( L ,7 ) end
+OperatorsCB[ 0x7E ] = function() TstBit( Read( HL() ) ,7 ); Cycle = 16 end
+OperatorsCB[ 0x7F ] = function() TstBit( A ,7 ) end
+
+
+------ RESET
+
+OperatorsCB[ 0x80 ] = function() B = RstBit( B ,0 ) end
+OperatorsCB[ 0x81 ] = function() C = RstBit( C ,0 ) end
+OperatorsCB[ 0x82 ] = function() D = RstBit( D ,0 ) end
+OperatorsCB[ 0x83 ] = function() E = RstBit( E ,0 ) end
+OperatorsCB[ 0x84 ] = function() H = RstBit( H ,0 ) end
+OperatorsCB[ 0x85 ] = function() L = RstBit( L ,0 ) end
+OperatorsCB[ 0x86 ] = function() Write( HL() , RstBit( Read( HL() )  ,0 )); Cycle = 16 end
+OperatorsCB[ 0x87 ] = function() A = RstBit( A ,0 ) end
+
+OperatorsCB[ 0x88 ] = function() B = RstBit( B ,1 ) end
+OperatorsCB[ 0x89 ] = function() C = RstBit( C ,1 ) end
+OperatorsCB[ 0x8A ] = function() D = RstBit( D ,1 ) end
+OperatorsCB[ 0x8B ] = function() E = RstBit( E ,1 ) end
+OperatorsCB[ 0x8C ] = function() H = RstBit( H ,1 ) end
+OperatorsCB[ 0x8D ] = function() L = RstBit( L ,1 ) end
+OperatorsCB[ 0x8E ] = function() Write( HL() , RstBit( Read( HL() ) ,1 )); Cycle = 16 end
+OperatorsCB[ 0x8F ] = function() A = RstBit( A ,1 ) end
+
+OperatorsCB[ 0x90 ] = function() B = RstBit( B ,2 ) end
+OperatorsCB[ 0x91 ] = function() C = RstBit( C ,2 ) end
+OperatorsCB[ 0x92 ] = function() D = RstBit( D ,2 ) end
+OperatorsCB[ 0x93 ] = function() E = RstBit( E ,2 ) end
+OperatorsCB[ 0x94 ] = function() H = RstBit( H ,2 ) end
+OperatorsCB[ 0x95 ] = function() L = RstBit( L ,2 ) end
+OperatorsCB[ 0x96 ] = function() Write( HL() , RstBit( Read( HL() ) ,2 )); Cycle = 16 end
+OperatorsCB[ 0x97 ] = function() A = RstBit( A ,2 ) end
+
+OperatorsCB[ 0x98 ] = function() B = RstBit( B ,3 ) end
+OperatorsCB[ 0x99 ] = function() C = RstBit( C ,3 ) end
+OperatorsCB[ 0x9A ] = function() D = RstBit( D ,3 ) end
+OperatorsCB[ 0x9B ] = function() E = RstBit( E ,3 ) end
+OperatorsCB[ 0x9C ] = function() H = RstBit( H ,3 ) end
+OperatorsCB[ 0x9D ] = function() L = RstBit( L ,3 ) end
+OperatorsCB[ 0x9E ] = function() Write( HL() , RstBit( Read( HL() ) ,3 )); Cycle = 16 end
+OperatorsCB[ 0x9F ] = function() A = RstBit( A ,3 ) end
+
+OperatorsCB[ 0xA0 ] = function() B = RstBit( B ,4 ) end
+OperatorsCB[ 0xA1 ] = function() C = RstBit( C ,4 ) end
+OperatorsCB[ 0xA2 ] = function() D = RstBit( D ,4 ) end
+OperatorsCB[ 0xA3 ] = function() E = RstBit( E ,4 ) end
+OperatorsCB[ 0xA4 ] = function() H = RstBit( H ,4 ) end
+OperatorsCB[ 0xA5 ] = function() L = RstBit( L ,4 ) end
+OperatorsCB[ 0xA6 ] = function() Write( HL() , RstBit( Read( HL() ) ,4 )); Cycle = 16 end
+OperatorsCB[ 0xA7 ] = function() A = RstBit( A ,4 ) end
+
+OperatorsCB[ 0xA8 ] = function() B = RstBit( B ,5 ) end
+OperatorsCB[ 0xA9 ] = function() C = RstBit( C ,5 ) end
+OperatorsCB[ 0xAA ] = function() D = RstBit( D ,5 ) end
+OperatorsCB[ 0xAB ] = function() E = RstBit( E ,5 ) end
+OperatorsCB[ 0xAC ] = function() H = RstBit( H ,5 ) end
+OperatorsCB[ 0xAD ] = function() L = RstBit( L ,5 ) end
+OperatorsCB[ 0xAE ] = function() Write( HL() , RstBit( Read( HL() ) ,5 )); Cycle = 16 end
+OperatorsCB[ 0xAF ] = function() A = RstBit( A ,5 ) end
+
+OperatorsCB[ 0xB0 ] = function() B = RstBit( B ,6 ) end
+OperatorsCB[ 0xB1 ] = function() C = RstBit( C ,6 ) end
+OperatorsCB[ 0xB2 ] = function() D = RstBit( D ,6 ) end
+OperatorsCB[ 0xB3 ] = function() E = RstBit( E ,6 ) end
+OperatorsCB[ 0xB4 ] = function() H = RstBit( H ,6 ) end
+OperatorsCB[ 0xB5 ] = function() L = RstBit( L ,6 ) end
+OperatorsCB[ 0xB6 ] = function() Write( HL() , RstBit( Read( HL() ) ,6 )); Cycle = 16 end
+OperatorsCB[ 0xB7 ] = function() A = RstBit( A ,6 ) end
+
+OperatorsCB[ 0xB8 ] = function() B = RstBit( B ,7 ) end
+OperatorsCB[ 0xB9 ] = function() C = RstBit( C ,7 ) end
+OperatorsCB[ 0xBA ] = function() D = RstBit( D ,7 ) end
+OperatorsCB[ 0xBB ] = function() E = RstBit( E ,7 ) end
+OperatorsCB[ 0xBC ] = function() H = RstBit( H ,7 ) end
+OperatorsCB[ 0xBD ] = function() L = RstBit( L ,7 ) end
+OperatorsCB[ 0xBE ] = function() Write( HL() , RstBit( Read( HL() ) ,7 )); Cycle = 16 end
+OperatorsCB[ 0xBF ] = function() A = RstBit( A ,7 ) end
+
+
+--- SET BIT
+
+
+
+OperatorsCB[ 0xC0 ] = function() B = SetBit( B ,0 ) end
+OperatorsCB[ 0xC1 ] = function() C = SetBit( C ,0 ) end
+OperatorsCB[ 0xC2 ] = function() D = SetBit( D ,0 ) end
+OperatorsCB[ 0xC3 ] = function() E = SetBit( E ,0 ) end
+OperatorsCB[ 0xC4 ] = function() H = SetBit( H ,0 ) end
+OperatorsCB[ 0xC5 ] = function() L = SetBit( L ,0 ) end
+OperatorsCB[ 0xC6 ] = function() Write( HL() , SetBit( Read( HL() ) ,0 )); Cycle = 16 end
+OperatorsCB[ 0xC7 ] = function() A = SetBit( A ,0 ) end
+
+OperatorsCB[ 0xC8 ] = function() B = SetBit( B ,1 ) end
+OperatorsCB[ 0xC9 ] = function() C = SetBit( C ,1 ) end
+OperatorsCB[ 0xCA ] = function() D = SetBit( D ,1 ) end
+OperatorsCB[ 0xCB ] = function() E = SetBit( E ,1 ) end
+OperatorsCB[ 0xCC ] = function() H = SetBit( H ,1 ) end
+OperatorsCB[ 0xCD ] = function() L = SetBit( L ,1 ) end
+OperatorsCB[ 0xCE ] = function() Write( HL() , SetBit( Read( HL() ) ,1 )); Cycle = 16 end
+OperatorsCB[ 0xCF ] = function() A = SetBit( A ,1 ) end
+
+OperatorsCB[ 0xD0 ] = function() B = SetBit( B ,2 ) end
+OperatorsCB[ 0xD1 ] = function() C = SetBit( C ,2 ) end
+OperatorsCB[ 0xD2 ] = function() D = SetBit( D ,2 ) end
+OperatorsCB[ 0xD3 ] = function() E = SetBit( E ,2 ) end
+OperatorsCB[ 0xD4 ] = function() H = SetBit( H ,2 ) end
+OperatorsCB[ 0xD5 ] = function() L = SetBit( L ,2 ) end
+OperatorsCB[ 0xD6 ] = function() Write( HL() , SetBit( Read( HL() ) ,2 )); Cycle = 16 end
+OperatorsCB[ 0xD7 ] = function() A = SetBit( A ,2 ) end
+
+OperatorsCB[ 0xD8 ] = function() B = SetBit( B ,3 ) end
+OperatorsCB[ 0xD9 ] = function() C = SetBit( C ,3 ) end
+OperatorsCB[ 0xDA ] = function() D = SetBit( D ,3 ) end
+OperatorsCB[ 0xDB ] = function() E = SetBit( E ,3 ) end
+OperatorsCB[ 0xDC ] = function() H = SetBit( H ,3 ) end
+OperatorsCB[ 0xDD ] = function() L = SetBit( L ,3 ) end
+OperatorsCB[ 0xDE ] = function() Write( HL() , SetBit( Read( HL() ) ,3 )); Cycle = 16 end
+OperatorsCB[ 0xDF ] = function() A = SetBit( A ,3 ) end
+
+OperatorsCB[ 0xE0 ] = function() B = SetBit( B ,4 ) end
+OperatorsCB[ 0xE1 ] = function() C = SetBit( C ,4 ) end
+OperatorsCB[ 0xE2 ] = function() D = SetBit( D ,4 ) end
+OperatorsCB[ 0xE3 ] = function() E = SetBit( E ,4 ) end
+OperatorsCB[ 0xE4 ] = function() H = SetBit( H ,4 ) end
+OperatorsCB[ 0xE5 ] = function() L = SetBit( L ,4 ) end
+OperatorsCB[ 0xE6 ] = function() Write( HL() , SetBit( Read( HL() ) ,4 )); Cycle = 16 end
+OperatorsCB[ 0xE7 ] = function() A = SetBit( A ,4 ) end
+
+OperatorsCB[ 0xE8 ] = function() B = SetBit( B ,5 ) end
+OperatorsCB[ 0xE9 ] = function() C = SetBit( C ,5 ) end
+OperatorsCB[ 0xEA ] = function() D = SetBit( D ,5 ) end
+OperatorsCB[ 0xEB ] = function() E = SetBit( E ,5 ) end
+OperatorsCB[ 0xEC ] = function() H = SetBit( H ,5 ) end
+OperatorsCB[ 0xED ] = function() L = SetBit( L ,5 ) end
+OperatorsCB[ 0xEE ] = function() Write( HL() , SetBit( Read( HL() ) ,5 )); Cycle = 16 end
+OperatorsCB[ 0xEF ] = function() A = SetBit( A ,5 ) end
+
+OperatorsCB[ 0xF0 ] = function() B = SetBit( B ,6 ) end
+OperatorsCB[ 0xF1 ] = function() C = SetBit( C ,6 ) end
+OperatorsCB[ 0xF2 ] = function() D = SetBit( D ,6 ) end
+OperatorsCB[ 0xF3 ] = function() E = SetBit( E ,6 ) end
+OperatorsCB[ 0xF4 ] = function() H = SetBit( H ,6 ) end
+OperatorsCB[ 0xF5 ] = function() L = SetBit( L ,6 ) end
+OperatorsCB[ 0xF6 ] = function() Write( HL() , SetBit( Read( HL() ) ,6 )); Cycle = 16 end
+OperatorsCB[ 0xF7 ] = function() A = SetBit( A ,6 ) end
+
+OperatorsCB[ 0xF8 ] = function() B = SetBit( B ,7 ) end
+OperatorsCB[ 0xF9 ] = function() C = SetBit( C ,7 ) end
+OperatorsCB[ 0xFA ] = function() D = SetBit( D ,7 ) end
+OperatorsCB[ 0xFB ] = function() E = SetBit( E ,7 ) end
+OperatorsCB[ 0xFC ] = function() H = SetBit( H ,7 ) end
+OperatorsCB[ 0xFD ] = function() L = SetBit( L ,7 ) end
+OperatorsCB[ 0xFE ] = function() Write( HL() , SetBit( Read( HL() ) ,7 )); Cycle = 16 end
+OperatorsCB[ 0xFF ] = function() A = SetBit( A ,7 ) end
+
+
+
+
+
+
+
+MRead = {}
+MWrite = {}
+
+local band = bit.band
+local bor = bit.bor
+local bxor = bit.bxor
+local bshr = bit.rshift
+local bshl = bit.lshift
+
+
+------------------------
+-- Main R/W Functions --
+------------------------
+
+function Read(Addr)
+
+	if not MRead[Addr] then error( string.format( "%X", Addr) ) end
+
+	return MRead[Addr]( Addr )
+end
+
+function Write(Addr,Data)
+
+	if not MWrite[Addr] then error( string.format( "%X", Addr) ) end
+
+	MWrite[Addr]( Addr, Data )
+end
+local function ReadBiosSpace( Addr ) return EnableBios and BIOS[ Addr ] or ROM[ Addr ] end
+local function ReadRomZero( Addr )   return ROM[ Addr] end
+
+local function ReadRomOne( Addr )
+	if CartMode == 0 then return ROM[ Addr ] end
+	if CartMode == 3 then return ROM[ Addr + 0x4000*(RomBank-1) ] end
+end
+
+local function ReadVideoRam( Addr ) return VRAM[ Addr ] end
+
+local function ReadExternalRam( Addr )
+	if CartMode == 3 then return ERAM[ Addr + 0x2000*RamBank ] end
+end
+
+local function ReadMainRam	( Addr ) return WRAM[Addr] end
+local function ReadEchoRam	( Addr ) return WRAM[Addr - 0x2000] end
+local function ReadSpriteRam( Addr ) return OAM[Addr] end
+local function ReadHighRam	( Addr ) return HRAM[Addr] end
+
+local function ReadIO ( Addr ) return IO[Addr] end
+
+-------------------------
+-- WRITE Memory Ranges --
+-------------------------
+
+local function RamTimerEnable( Addr, Data )
+	if CartMode == 3 then
+		if Data == 0x0A then CartRamTimerEnable = true end
+		if Data == 0x00 then CartRamTimerEnable = false end
+	end
+end
+
+
+local function RomBankNumber( Addr, Data )
+	if CartMode == 3 then RomBank = band( Data > 0 and Data or 1, 127 ) end
+end
+
+local function RamBankNumber( Addr, Data )
+	if CartMode == 3 and Data < 4 then RamBank = band(Data, 3) end
+end
+
+local function RomRamModeSelect( Addr, Data )
+end
+
+local function WriteVideoRam( Addr, Data ) VRAM[Addr] = Data end
+
+local function WriteExternalRam( Addr, Data )
+	if CartMode == 3 then ERAM[Addr + 0x2000*RamBank ] = Data end
+end
+
+local function WriteMainRam  ( Addr, Data ) WRAM[Addr] = Data end
+local function WriteEchoRam  ( Addr, Data ) end
+local function WriteSpriteRam( Addr, Data ) OAM[Addr] = Data end
+local function WriteHighRam  ( Addr, Data ) HRAM[Addr] = Data end
+
+local function WriteIO  ( Addr, Data ) IO[Addr] = Data end
+
+
+local function WriteNothing ( Addr, Data ) end
+local function ReadNothing ( Addr ) return 0 end
+
+------------------------
+-- READ Memory Ranges --
+------------------------
+
+-- Read
+for n = 0x0000, 0x00FF 	do MRead[n] = ReadBiosSpace end
+for n = 0x0100, 0x3FFF 	do MRead[n] = ReadRomZero end
+for n = 0x4000, 0x7FFF 	do MRead[n] = ReadRomOne end
+
+for n = 0x8000, 0x9FFF 	do MRead[n] = ReadVideoRam end
+for n = 0xA000, 0xBFFF 	do MRead[n] = ReadExternalRam end
+for n = 0xC000, 0xDFFF 	do MRead[n] = ReadMainRam end
+for n = 0xE000, 0xFDFF  do MRead[n] = ReadEchoRam end
+for n = 0xFE00, 0xFE9F 	do MRead[n] = ReadSpriteRam end
+for n = 0xFEA0, 0xFEFF 	do MRead[n] = ReadNothing end --- empty space
+for n = 0xFF00, 0xFF7F  do MRead[n] = ReadIO end
+for n = 0xFF80, 0xFFFE 	do MRead[n] = ReadHighRam end
+
+-- Write
+
+for n = 0x0000, 0x1FFF  do MWrite[n] = RamTimerEnable end
+for n = 0x2000, 0x3FFF 	do MWrite[n] = RomBankNumber end
+for n = 0x4000, 0x5FFF 	do MWrite[n] = RamBankNumber end
+for n = 0x6000, 0x7FFF  do MWrite[n] = RomRamModeSelect end
+
+for n = 0x8000, 0x9FFF 	do MWrite[n] = WriteVideoRam end
+for n = 0xA000, 0xBFFF 	do MWrite[n] = WriteExternalRam end
+for n = 0xC000, 0xDFFF 	do MWrite[n] = WriteMainRam end
+for n = 0xE000, 0xFDFF  do MWrite[n] = WriteEchoRam end
+for n = 0xFE00, 0xFE9F 	do MWrite[n] = WriteSpriteRam end
+for n = 0xFEA0, 0xFEFF 	do MWrite[n] = WriteNothing end --- empty space
+for n = 0xFF00, 0xFF7F  do MWrite[n] = WriteIO end
+for n = 0xFF80, 0xFFFE 	do MWrite[n] = WriteHighRam end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+------------------------
+-- Hardware registers --
+------------------------
+
+--- DMA Transfer
+
+MRead[ 0xFF46 ] = function(  Addr ) return 0 end
+
+MWrite[ 0xFF46 ] = function(  Addr, Data )
+	DMAddr = bshl(Data, 8)
+
+	for n = 0, 0xA0 do
+		OAM[ bor( 0xFE00 , n ) ] = Read( bor( DMAddr , n ) )
+	end
+end
+
+
+
+
+
+
+
+-- Disable Bootrom
+MRead[ 0xFF50 ] = function(  Addr ) return 0 end
+MWrite[ 0xFF50 ] = function(  Addr ) EnableBios = false end
+
+
+
+
+
+
+
+
+
+
+function Restart()
+
+	-- Memory
+	BIOS = {}		-- Bios
+	ROM = {} 		-- Used for external Cart ROM, each bank is offset by 0x4000
+
+	ERAM = {}		-- Used for external Cart RAM, each bank is 8KB
+	VRAM = {}		-- 2 Banks in CB mode, 1 in DMG
+	WRAM = {} 		-- Main ram, 8 banks in CGB mode, 2 in DMG
+	HRAM = {}		-- High Ram, 127B
+
+	OAM = {}		-- Sprite Attribute  
+	IO = {}
+
+	for i = 0, 0x1FFFF do
+		ERAM[i] = 0
+		VRAM[i] = 0
+		WRAM[i] = 0
+		HRAM[i] = 0
+		OAM[i] = 0
+		IO[i] = 0
+	end
+
+	BIOS = { [0] = 0x31, 0xFE, 0xFF, 0xAF, 0x21, 0xFF, 0x9F, 0x32, 0xCB, 0x7C, 0x20, 0xFB, 0x21, 0x26, 0xFF, 0x0E, 0x11, 0x3E, 0x80, 0x32, 0xE2, 0x0C, 0x3E, 0xF3, 0xE2, 0x32, 0x3E, 0x77, 0x77, 0x3E, 0xFC, 0xE0, 0x47, 0x11, 0x04, 0x01, 0x21, 0x10, 0x80, 0x1A, 0xCD, 0x95, 0x00, 0xCD, 0x96, 0x00, 0x13, 0x7B, 0xFE, 0x34, 0x20, 0xF3, 0x11, 0xD8, 0x00, 0x06, 0x08, 0x1A, 0x13, 0x22, 0x23, 0x05, 0x20, 0xF9, 0x3E, 0x19, 0xEA, 0x10, 0x99, 0x21, 0x2F, 0x99, 0x0E, 0x0C, 0x3D, 0x28, 0x08, 0x32, 0x0D, 0x20, 0xF9, 0x2E, 0x0F, 0x18, 0xF3, 0x67, 0x3E, 0x64, 0x57, 0xE0, 0x42, 0x3E, 0x91, 0xE0, 0x40, 0x04, 0x1E, 0x02, 0x0E, 0x0C, 0xF0, 0x44, 0xFE, 0x90, 0x20, 0xFA, 0x0D, 0x20, 0xF7, 0x1D, 0x20, 0xF2, 0x0E, 0x13, 0x24, 0x7C, 0x1E, 0x83, 0xFE, 0x62, 0x28, 0x06, 0x1E, 0xC1, 0xFE, 0x64, 0x20, 0x06, 0x7B, 0xE2, 0x0C, 0x3E, 0x87, 0xE2, 0xF0, 0x42, 0x90, 0xE0, 0x42, 0x15, 0x20, 0xD2, 0x05, 0x20, 0x4F, 0x16, 0x20, 0x18, 0xCB, 0x4F, 0x06, 0x04, 0xC5, 0xCB, 0x11, 0x17, 0xC1, 0xCB, 0x11, 0x17, 0x05, 0x20, 0xF5, 0x22, 0x23, 0x22, 0x23, 0xC9, 0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D, 0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99, 0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E, 0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C, 0x21, 0x04, 0x01, 0x11, 0xA8, 0x00, 0x1A, 0x13, 0xBE, 0x20, 0xFE, 0x23, 0x7D, 0xFE, 0x34, 0x20, 0xF5, 0x06, 0x19, 0x78, 0x86, 0x23, 0x05, 0x20, 0xFB, 0x86, 0x20, 0xFE, 0x3E, 0x01, 0xE0, 0x50 }
+
+	
+	-- Memory & Cart Flags
+	EnableBios = true 	-- Enables the Bios, disabled after the bios is used
+	CartMode = 3	-- 0 for ROM mode, 1 for MBC1, 2 for MBC2, 3 for MBC3
+	RomBank = 1 		-- The current ROM bank stored in 0x4000 to 0x7FFF
+	RamBank = 0		-- The current RAM bank
+	
+	-- Registers
+	A = 0
+	B = 0
+	C = 0	
+	D = 0
+	E = 0
+	H = 0
+	L = 0x20
+
+	PC = 0x0
+	SP = 0x0
+	
+	-- Internal Flags
+	Cf = false -- Carry
+	Hf = false -- Half Carry
+	Zf = false -- Zero 
+	Nf = false -- Subtract
+	
+	-- Virtual Flags
+	IME = true		-- Interupt Master Enable
+	Halt = false 		-- is halt engaged (do nothing until an interupt)
+
+
+
+	-- Cycles and other timing
+	TotalCycles = 0
+	Cycle = 0
+
+
+	RestartGPU()
+	RestartInterupts()
+	RestartTimers()
+	RestartJoypad()
+	RestartSound()
+
+
+
+end
+
+
+
+
+
+
+
+function Think()
+
+	TotalCycles = 0
+
+	while TotalCycles < 70224 do
+		Step()
+	end
+        os.sleep(1/20) -- prevent crashing due to not yielding
+
+end
+
+
+
+
+----------------
+--Step function excutes a single operation at a time. 
+----------------
+function Step()
+
+	for i = 1,1 do -- Silly JIT optomisation :C, Thanks Snoopy1611!
+		if not Halt then
+			Operators[Read(PC)]()
+		else
+			Cycle = 4
+		end
+
+		TotalCycles = TotalCycles + Cycle
+
+		UpdateTimers()
+		UpdateScreen()
+		UpdateInterupts()
+		UpdateSound()
+	end
+
+end
+
+function LoadRom(RomFile)
+        print(RomFile)
+        handle = fs.open(RomFile, "rb")
+        N = 0
+        b = handle.read()
+	while b ~= nil do
+		ROM[N] = b
+                b = handle.read()
+                N = N + 1
+	end
+
+        handle.close()
+end
+
+
+
+
+
+--[[
+	0000-3FFF   16KB ROM Bank 00     (in cartridge, fixed at bank 00)
+	4000-7FFF   16KB ROM Bank 01..NN (in cartridge, switchable bank number)
+	8000-9FFF   8KB Video RAM (VRAM) (switchable bank 0-1 in CGB Mode)
+	A000-BFFF   8KB External RAM     (in cartridge, switchable bank, if any)
+	C000-CFFF   4KB Work RAM Bank 0 (WRAM)
+	D000-DFFF   4KB Work RAM Bank 1 (WRAM)  (switchable bank 1-7 in CGB Mode)
+	E000-FDFF   Same as C000-DDFF (ECHO)    (typically not used)
+	FE00-FE9F   Sprite Attribute Table (OAM)
+	FEA0-FEFF   Not Usable
+	FF00-FF7F   I/O Ports
+	FF80-FFFE   High RAM (HRAM)
+	FFFF        Interrupt Enable Register
+
+
+
+
+	FF00		Joypad (R/W)
+	FF01		Serial transfer data (R/W)
+	FF02		Serial Transfer Control (R/W)
+
+	FF04 		Divider Register (R/W)
+	FF05		Timer counter (R/W)
+	FF06		Timer Modulo (R/W)
+	FF07 		Timer Control (R/W)
+
+	FF0F 		Interrupt Flag (R/W)
+
+	FF10		Channel 1 Sweep
+	FF11		Channel 1 Sound length/Wave pattern duty (R/W)
+	FF12		Channel 1 Volume Envelope (R/W)
+	FF13		Channel 1 Frequency lo (Write Only)
+	FF14		Channel 1 Frequency hi (R/W)
+
+	FF16		Channel 2 Sound Length/Wave Pattern Duty (R/W)
+	FF17		Channel 2 Volume Envelope (R/W)
+	FF18		Channel 2 Frequency lo data (W)
+	FF19		Channel 2 Frequency hi data (R/W)
+
+	FF1A		Channel 3 Sound on/off (R/W)
+	FF1B		Channel 3 Sound Length
+	FF1C		Channel 3 Select output level (R/W)
+	FF1D		Channel 3 Frequency's lower data (W)
+	FF1E		Channel 3 Frequency's higher data (R/W)
+
+	FF20		Channel 4 Sound Length (R/W)
+	FF21		Channel 4 Volume Envelope (R/W)
+	FF22		Channel 4 Polynomial Counter (R/W)
+	FF23		Channel 4 Counter/consecutive; Inital (R/W)
+
+	FF24		Channel control / ON-OFF / Volume (R/W)
+	FF25		Selection of Sound output terminal (R/W)
+	FF26		Sound on/off
+
+
+
+	FF30-FF3F - Wave Pattern RAM
+
+	FF40		LCD Control Register
+	FF41		LCD Status Register
+	FF42 		Scroll Y
+	FF43		Scroll X
+	FF44		Current Scanline Y
+	FF45		LY Compare
+
+	FF46		DMA Transfer
+
+	FF47		Background Palette
+	FF48		Sprite Palette 0
+	FF49		Sprite Palette 1
+
+	FF4A		WindowY
+	FF4B		WindowX
+
+	FF4F		Colour VRam Bank
+
+	FF51		HDMA1 - CGB Mode Only - New DMA Source, High
+	FF52		HDMA2 - CGB Mode Only - New DMA Source, Low
+	FF53		HDMA3 - CGB Mode Only - New DMA Destination, High
+	FF54		HDMA4 - CGB Mode Only - New DMA Destination, Low
+	FF55 		HDMA5 - CGB Mode Only - New DMA Length/Mode/Start
+
+	FF68		Colour Background Palette Index
+	FF69		Colour Background Palette Data
+	FF6A		Colour Sprite Palette Index
+	FF6B		Colour Sprite Data
+
+
+
+]]--
+
+
+
+
+
+local band = bit.band
+local bor = bit.bor
+local bxor = bit.bxor
+local bshr = bit.rshift
+local bshl = bit.lshift
+
+
+local math_ceil = math.ceil
+local math_floor = math.floor
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function RestartGPU() 
+
+
+	--------------------------------
+	-- LCD/GPU Hardware Registers --
+	--------------------------------
+
+	ScanCycle = 0	-- The number of cycles executed so far, resets at end of hblank.
+
+	-- LCD Control Register
+	LCDEnable = false -- Disables and enables the LCD
+	WindowMap = 0x98000 -- Pointer to the Map used by the Window Tile map. 0 = 0x9800, 1 = 0x9C00
+	WindowEnable = false -- Enables and Disables drawing of the window
+	TileData = false -- Pointer to the tiledata used by both window and bg. 0 = 0x8800, 1 =0x8000
+	BGMap = 0x9800 -- Pointer to the Map used by the BG. 0 = 0x9800, 1 = 0x9C00
+	SpriteSize = 8 -- Sprite Vertical size. 0 = 8, 1 = 16
+	SpriteEnable = false -- Enables/Disables drawing of sprites
+	BGEnable = false -- Enabled/Disables the drawing of the BG
+
+	-- LCD Status Register
+	CoincidenceInterupt = false
+	ModeTwoInterupt = false
+	ModeOneInterupt = false
+	ModeZeroInterupt = false
+
+	CoincidenceFlag = 0
+	Mode = 0
+
+	-- Scroll Registers
+	ScrollX = 0
+	ScrollY = 0
+	WindowX = 0
+	WindowY = 0
+
+	-- Current scanline Y coordinate register
+	ScanlineY = 1
+
+	-- Value to compare with ScanLineY for Coincidence (Nothing special, just a value you can R/W to)
+	CompareY = 0
+
+	-- Palettes
+
+	--Drawing Method stuff
+
+	interleve = 0x300
+	FrameSkip = true
+
+	Pixels = {} -- Stores the pixels drawn last frame, this way we only redraw what we need to. 
+
+	for n = 0, 23040 do
+		Pixels[n] = 1
+	end
+
+	ScanlinePixels = {}-- Stores the current scanlines pixels, drawing them at the end
+	ScanlineData = {}-- Stores the current scanlines data, for comparing transparency
+
+	for n = 0, 200 do
+		ScanlinePixels[n] = 0
+		ScanlineData[n] = 0
+	end
+
+
+
+
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function UpdateScreen()
+	if LCDEnable then
+
+		ScanCycle = ScanCycle + Cycle
+
+		if ScanCycle > 456 then
+			ScanCycle = ScanCycle - 456
+
+			ScanlineY = ( ScanlineY + 1 )%154
+		end
+
+
+		if ScanlineY >= 144 and ScanlineY <= 153 then -- vblank
+
+			if Mode ~= 1 then
+				if ModeOneInterupt then IF = bor( IF, 2 ) end -- request LCD interupt for entering Mode 1
+				IF = bor( IF, 1 ) -- Reques VBlank interupt
+				Mode = 1
+			end
+
+		elseif ScanlineY >= 0 and ScanlineY <= 143 then -- not vblank
+
+			if ScanCycle >= 1 and ScanCycle <= 80 then
+				if Mode ~= 2 then
+					if ModeTwoInterupt then IF = bor( IF, 2 ) end -- request LCD interupt for entering Mode 2
+					Mode = 2
+				end
+
+			elseif ScanCycle >= 81 and ScanCycle <= 252 then
+				if Mode ~= 3 then
+					Mode = 3
+				end
+
+			elseif ScanCycle >= 253 and ScanCycle <= 456 then
+
+				if Mode ~= 0 then
+					Render_Scanline()
+					if ModeZeroInterupt then IF = bor( IF, 2 ) end -- request LCD interupt for entering Mode 0
+					Mode = 0
+				end
+
+
+			end
+
+		end
+
+	else
+
+		ScanlineY = 0
+		ScanCycle = 0
+		Mode = 0
+
+	end
+
+
+	if ScanlineY == CompareY and CoincidenceInterupt then
+		IF = bor( IF, 2 ) -- request LCD interrupt
+	end
+
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-----------------
+-- LCD and GPU --
+-----------------
+
+-- Background Scroll Y
+MRead[ 0xFF42 ] = function(  Addr ) return ScrollY end
+MWrite[ 0xFF42 ] = function(  Addr, Data ) ScrollY = Data end
+
+-- Background Scroll X
+MRead[ 0xFF43 ] = function(  Addr ) return ScrollX end
+MWrite[ 0xFF43 ] = function(  Addr, Data ) ScrollX = Data end
+
+-- Window Scroll X
+MRead[ 0xFF4A ] = function(  Addr ) return WindowY end
+MWrite[ 0xFF4A ] = function(  Addr, Data ) WindowY = Data end
+
+-- Window Scroll Y
+MRead[ 0xFF4B ] = function(  Addr ) return WindowX end
+MWrite[ 0xFF4B ] = function(  Addr, Data ) WindowX = Data end
+
+
+
+-- Current Scanline Register
+MRead[ 0xFF44 ] = function(  Addr ) return ScanlineY end
+MWrite[ 0xFF44 ] = function(  Addr, Data ) ScanlineY = 0 end -- Reset Scanline
+
+-- LY Compare
+MRead[ 0xFF45 ] = function(  Addr ) return CompareY end
+MWrite[ 0xFF45 ] = function(  Addr, Data ) CompareY = Data end
+
+-- LCD Control Register
+MRead[ 0xFF40 ] = function(  Addr ) return IO[Addr] end
+MWrite[ 0xFF40 ] = function(  Addr, Data )
+
+	IO[Addr] = Data
+
+	LCDEnable 		=  band(128, Data) == 128
+	WindowMap 		=  ( band(64, Data) == 64 and 0x9C00 or 0x9800)
+	WindowEnable 	=  band(32, Data) == 32
+	TileData 		=  band(16, Data) == 16
+	BGMap 			=  ( band(8, Data) == 8 and 0x9C00 or 0x9800)
+	SpriteSize 		=  ( band(4, Data) == 4 and 16 or 8)
+	SpriteEnable 	=  band(2, Data) == 2
+	BGEnable 		=  band(1, Data) == 1
+
+end
+
+-- LCD Status Regiter
+
+MRead[ 0xFF41 ] = function(  Addr )
+	return ( (CoincidenceInterupt and 64 or 0) +
+	(ModeTwoInterupt and 32 or 0) +
+	(ModeOneInterupt and 16 or 0) +
+	(ModeZeroInterupt and 8 or 0) +
+	(CompareY == ScanlineY and 4 or 0) +
+	Mode )
+end
+
+MWrite[ 0xFF41 ] = function(  Addr, Data )
+	CoincidenceInterupt = band(Data, 64) == 64
+	ModeTwoInterupt = band(Data, 32) == 32
+	ModeOneInterupt = band(Data, 16) == 16
+	ModeZeroInterupt = band(Data, 8) == 8
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function Render_Scanline()
+
+
+
+	local PalMem = IO[ 0xFF47 ]
+
+	-- Setup the palette
+	local BGPal = {
+	[0] = band( PalMem, 3 ),
+	band( bshr(PalMem, 2), 3), 
+	band( bshr(PalMem, 4), 3),
+	band( bshr(PalMem, 6), 3) }	
+
+
+	local YCo = ScanlineY 
+	local PixelY = YCo + 0.5
+
+	local TileX = math_floor( ScrollX/8 ) 
+	local TileY = math_floor( band((ScrollY + YCo), 0xFF)/8 )
+
+	local XOffset = 7 - ( ScrollX % 8 )
+	local YOffset = (ScrollY + YCo) % 8
+
+	local WinTileY = math_floor( (YCo - WindowY)/8 )
+	local WinYOfffset = (YCo - WindowY) % 8
+
+	local WinX = WindowX - 7
+
+
+	if BGEnable then
+
+		for i = 0, 20 do
+
+			local TileID = VRAM[ BGMap + band(i + TileX, 0x1F) + TileY*32 ]
+			local ByteA
+			local ByteB
+
+			if TileData then
+
+				ByteA = VRAM[ 0x8000 + TileID*16 + YOffset*2 ]
+				ByteB = VRAM[ 0x8000 + TileID*16 + YOffset*2 + 1 ]
+
+			else
+
+				TileID = band(TileID, 127) - band(TileID, 128)
+
+				ByteA = VRAM[ 0x9000 + TileID*16 + YOffset*2 ]
+				ByteB = VRAM[ 0x9000 + TileID*16 + YOffset*2 + 1 ]
+
+			end
+
+			for j = 0, 7 do
+					
+				local PixelX = i*8 - j + XOffset 
+
+				if PixelX >= 0 and PixelX < 160 then
+
+					local BitA = band( bshr(ByteA, j), 1) 
+					local BitB = band( bshr(ByteB, j), 1)
+
+					local Colour = BGPal[ BitB*2 + BitA ]
+
+					ScanlinePixels[PixelX] = Colour
+					ScanlineData[PixelX] = BitB*2 + BitA
+				end
+			end
+		end
+	end
+
+	if WindowEnable and YCo >= WindowY and WinX >= -7 and WinX < 160 then
+
+		for i = 0, 20 do
+
+			local TileID = VRAM[ WindowMap + i + WinTileY*32 ]
+			local ByteA
+			local ByteB
+
+			if TileData then
+
+				ByteA = VRAM[ 0x8000 + TileID*16 + WinYOfffset*2 ]
+				ByteB = VRAM[ 0x8000 + TileID*16 + WinYOfffset*2 + 1 ]
+
+			else
+
+				TileID = band(TileID, 127) - band(TileID, 128)
+
+				ByteA = VRAM[ 0x9000 + TileID*16 + WinYOfffset*2 ]
+				ByteB = VRAM[ 0x9000 + TileID*16 + WinYOfffset*2 + 1 ]
+
+			end
+
+			for j = 0, 7 do
+					
+				local PixelX = i*8 - j + WindowX
+
+				if PixelX >= 0 and PixelX < 160 then
+
+					local BitA = band( bshr(ByteA, j), 1) 
+					local BitB = band( bshr(ByteB, j), 1)
+
+					local Colour = BGPal[ BitB*2 + BitA ]
+
+					ScanlinePixels[PixelX] = Colour
+					ScanlineData[PixelX] = BitB*2 + BitA
+				end
+			end
+		end
+	end
+
+
+
+	if SpriteEnable then
+
+		local PalMem1 = IO[ 0xFF49 ]
+		local PalMem2 = IO[ 0xFF48 ]
+
+		local SpPal1 = {
+		band( bshr(PalMem1, 2), 3), 
+		band( bshr(PalMem1, 4), 3),
+		band( bshr(PalMem1, 6), 3) }
+
+		local SpPal2 = {
+		band( bshr(PalMem2, 2), 3), 
+		band( bshr(PalMem2, 4), 3),
+		band( bshr(PalMem2, 6), 3) }
+
+		if SpriteSize == 8 then
+
+			for n = 160, 0, -4 do
+
+				local YPos = OAM[ 0xFE00 + n ] - 16
+				local XPos = OAM[ 0xFE00 + n + 1 ] - 8
+				local TileID = OAM[ 0xFE00 + n + 2 ]
+				local SpriteFlags = OAM[ 0xFE00 + n + 3 ]
+				
+				local Alpha =  band(SpriteFlags  , 128) == 128
+				local YFlip = band(SpriteFlags , 64)    == 64
+				local XFlip = band(SpriteFlags , 32)    == 32
+				local SPalID = band(SpriteFlags , 16)   == 16
+
+				if ScanlineY >= YPos and ScanlineY < YPos + 8 then
+
+					local TileOffset = YFlip and -(ScanlineY - YPos) + 7 or ScanlineY - YPos
+
+					local ByteA = VRAM[ 0x8000 + TileID*16 + TileOffset*2 ]
+					local ByteB = VRAM[ 0x8000 + TileID*16 + TileOffset*2 + 1 ]
+
+					for j = 0, 7 do
+							
+						local PixelX = XFlip and j + XPos or -j + 7 + XPos
+
+						if PixelX >= 0 and PixelX < 160 then
+
+							local BitA = band( bshr(ByteA, j), 1) 
+							local BitB = band( bshr(ByteB, j), 1)
+
+							if BitA + BitB > 0 then
+
+								local Colour = SPalID and SpPal1[ BitB*2 + BitA ] or SpPal2[ BitB*2 + BitA ] 
+
+								if ( not Alpha ) or ScanlineData[PixelX] == 0 then
+									ScanlinePixels[PixelX] = Colour
+								end
+
+							end
+						end
+					end
+				end
+			end
+
+		else
+
+			for n = 160, 0, -4 do
+
+				local YPos = OAM[ 0xFE00 + n ] - 16
+				local XPos = OAM[ 0xFE00 + n + 1 ] - 8
+				local TileID = OAM[ 0xFE00 + n + 2 ]
+				local SpriteFlags = OAM[ 0xFE00 + n + 3 ]
+				
+				local Alpha =  band(SpriteFlags  , 128) == 128
+				local YFlip = band(SpriteFlags , 64)    == 64
+				local XFlip = band(SpriteFlags , 32)    == 32
+				local SPalID = band(SpriteFlags , 16)   == 16
+
+				if ScanlineY >= YPos and ScanlineY < YPos + 16 then
+
+					local TileOffset = YFlip and -(ScanlineY - YPos) + 15 or ScanlineY - YPos
+
+					if TileOffset < 8 then
+
+						TileID = band(TileID, 0xFE)
+
+					else
+
+						TileID = bor(TileID, 0x01)
+
+						TileOffset = TileOffset - 8
+
+					end
+
+
+					local ByteA = VRAM[ 0x8000 + TileID*16 + TileOffset*2 ]
+					local ByteB = VRAM[ 0x8000 + TileID*16 + TileOffset*2 + 1 ]
+
+
+					for j = 0, 7 do
+							
+						local PixelX = XFlip and j + XPos or -j + 7 + XPos
+
+						if PixelX >= 0 and PixelX < 160 then
+
+							local BitA = band( bshr(ByteA, j), 1) 
+							local BitB = band( bshr(ByteB, j), 1)
+
+							if BitA + BitB > 0 then
+
+								local Colour = SPalID and SpPal1[ BitB*2 + BitA ] or SpPal2[ BitB*2 + BitA ]
+
+								if ( not Alpha ) or ScanlineData[PixelX] == 0 then
+									ScanlinePixels[PixelX] = Colour
+								end
+
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+
+
+	for n = 0, 159 do
+		local Colour = ScanlinePixels[n]
+		local ArrayCoords = YCo*170 + n + 1
+
+		if Pixels[ArrayCoords] ~= Colour then
+
+			--love.graphics.setColor( ColourPalette[Colour][1], ColourPalette[Colour][2], ColourPalette[Colour][3], 255 )
+			--love.graphics.point( n + 0.5, YCo + 0.5 )
+                        
+                        canvas:drawPixel(n, YCo, ColourPalette[Colour])
+			Pixels[ArrayCoords] = Colour
+
+		end
+	end
+
+end
+
+
+
+
+
+
+
+
+
+
+--[[
+
+
+
+
+	if SpriteSize == 8 then
+
+
+		local PalMem1 = Memory[ 0xFF49 ]
+		local PalMem2 = Memory[ 0xFF48 ]
+
+		for n = 0, 159, 4 do
+			local YPos = Memory[ 0xFE00 + n ]
+			if YPos > 0 and YPos < 160 then
+				local XPos = Memory[ 0xFE00 + (n+1) ]
+				if XPos > 0 and XPos < 168 then
+
+					local SpriteFlags = Memory[ 0xFE00 + (n+3) ]
+					
+					local TileID = Memory[ 0xFE00 + (n+2) ]
+					local Alpha =  band(SpriteFlags  , 128) == 128
+					local YFlip = band(SpriteFlags , 64)    == 64
+					local XFlip = band(SpriteFlags , 32)    == 32
+					local SPalID = band(SpriteFlags , 16)   == 16
+
+					if SPalID then
+						SpPal = {
+						band( bshr(PalMem1, 2), 3), 
+						band( bshr(PalMem1, 4), 3),
+						band( bshr(PalMem1, 6), 3) }
+					else
+						SpPal = {
+						band( bshr(PalMem2, 2), 3), 
+						band( bshr(PalMem2, 4), 3),
+						band( bshr(PalMem2, 6), 3) }
+					end
+
+
+					for i = 0,7 do
+
+						local ByteA = Memory[ 0x8000 + TileID*16 + i*2]
+						local ByteB = Memory[ 0x8000 + TileID*16 + i*2 + 1]
+
+						for j = 0,7 do
+
+						local BitA = band( bshr(ByteA, j), 1) --that's a lower-case L, not a 1
+						local BitB = band( bshr(ByteB, j), 1)
+
+							if ( bshl(BitB, 1) +  BitA) > 0 then
+
+								local PixelX = XPos - 1 + (XFlip and j - 7 or -j)
+								local PixelY = YPos - 16 + (YFlip and -i + 7 or i)
+
+								local ArrayCoords = (PixelX + 1) + (PixelY + 1)*170
+								
+								local Colour = ColourDB[ SpPal[ BitB*2 +  BitA] ]
+
+								if PixelX >= 0 and PixelX < 160 and PixelY >= 0 and PixelY < 144 then
+
+								if Pixels[ArrayCoords] ~= Colour then
+
+									love.graphics.setColor( Colour, Colour, Colour, 255 )
+									love.graphics.point( PixelX + 1.5, PixelY + 1.5 )
+
+									Pixels[ArrayCoords] = Colour
+
+								end
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	else
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function GPUDraw2()
+
+
+	local PalMem = Memory[ 0xFF47 ]
+
+	-- Setup the palette
+	local BGPal = {
+	band( bshr(PalMem, 2), 3), 
+	band( bshr(PalMem, 4), 3),
+	band( bshr(PalMem, 6), 3) }	
+	BGPal[0] = band( PalMem, 3 )
+
+
+	for i = 0,31 do
+		for j = 0,31 do
+
+		local TileID = Memory[ BGMap + i + j*32 ]
+
+		for ii = 0, 7 do
+			local ByteA
+			local ByteB
+
+			if TileData == 0x8000 then
+
+				ByteA = Memory[ 0x8000 + TileID*16 + ii*2 ]
+				ByteB = Memory[ 0x8000 + TileID*16 + ii*2 + 1 ]
+
+			else
+
+				TileID = band(TileID, 127) - band(TileID, 128)
+
+				ByteA = Memory[ 0x8000 + TileID*16 + ii*2 ]
+				ByteB = Memory[ 0x8000 + TileID*16 + ii*2 + 1 ]
+
+			end
+
+			for jj = 0, 7 do
+					
+				local PixelX = i*8 + -jj + 20
+				local PixelY = j*8 + ii + 20
+
+				local BitA = band( bshr(ByteA, jj), 1) 
+				local BitB = band( bshr(ByteB, jj), 1)
+
+				local Colour = ColourDB[ BGPal[ bor( bshl(BitB,1) ,  BitA) ] ]
+
+				local ArrayCoords = PixelX + (PixelY + 1)*170
+
+					if Pixels[ArrayCoords] ~= Colour then
+
+						love.graphics.setColor( Colour, Colour, Colour, 255 )
+						love.graphics.point( PixelX + 0.5, PixelY + 0.5 )
+
+						Pixels[ArrayCoords] = Colour
+
+					end
+				end
+			end
+		end
+	end
+end
+
+
+
+
+
+function GPUDraw()
+
+	local XMax = 21
+	local YMax = 19
+
+	if WindowEnable and WindowX >= 0 and WindowX < 167 and WindowY >= 0 and WindowY < 144  then
+		XMax = math_floor((WindowX - 7)/8)
+		YMax = math_floor((WindowY)/8)
+	end
+
+
+
+
+	if true then
+
+		local PalMem = Memory[ 0xFF47 ]
+		local BGPal = {
+		band( bshr(PalMem, 2), 3), 
+		band( bshr(PalMem, 4), 3),
+		band( bshr(PalMem, 6), 3) }
+
+		BGPal[0] = band( PalMem, 3 )
+
+		local TileX = math_floor(ScrollX/8)
+		local TileY = math_floor(ScrollY/8)
+
+		local TileMap = BGMap
+
+		for i = 0, 18 do -- The Vertical, 19 tiles max high (Possible 18 if it's lined up)
+
+			for j = 0, 20 do -- The Horizontal, 21 tiles max high (Possibly 20 if it's lined up)
+
+
+				local iy = (i + TileY)
+				local jx = (j + TileX)
+
+				local ii = band(iy , 0x1F) -- Wrap Around
+				local jj = band(jx , 0x1F) -- Wrap Around
+
+
+
+				-- Get the current Tile based on the current map
+				local TileID = 0
+					
+				if TileData == 0x8000 then
+					TileID = Memory[ TileMap + ii*32 + jj ]
+				else
+					TileID = Memory[ TileMap + ii*32 + jj ]
+					TileID = band(TileID, 127) - band(TileID, 128)
+					TileData = 0x9000
+				end
+
+				-- Loop through the 8 by 8 tile. 
+				
+				if not (i > YMax and j > XMax) then
+
+					for k = 0,7 do
+
+						local ByteA = Memory[ TileData + TileID*16 + k*2]
+						local ByteB = Memory[ TileData + TileID*16 + k*2 + 1]
+
+						for l = 0,7 do
+
+							local BitA = band( bshr(ByteA, l), 1) --that's a lower-case L, not a 1
+							local BitB = band( bshr(ByteB, l), 1)
+								
+							local PixelX = (jx*8 - l + 7	) - ScrollX
+							local PixelY = (iy*8 + k + 0) - ScrollY
+
+							if PixelX >= 0 and PixelX < 160 and PixelY >= 0 and PixelY < 144 then
+
+								local Colour = ColourDB[ BGPal[ bor( bshl(BitB,1) ,  BitA) ] ]
+
+								local ArrayCoords = (PixelX + 1) + (PixelY + 1)*170
+
+								if Pixels[ArrayCoords] ~= Colour then
+
+									love.graphics.setColor( Colour, Colour, Colour, 255 )
+									love.graphics.point( PixelX + 1.5, PixelY + 1.5 )
+
+									Pixels[ArrayCoords] = Colour
+
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+
+
+
+
+
+	if WindowEnable and WindowX >= 0 and WindowX < 167 and WindowY >= 0 and WindowY < 144  then
+
+		WindowX = WindowX - 7
+
+		XMax = math_floor((160 - WindowX)/8)
+		YMax = math_floor((144 - WindowY)/8)
+
+		local PalMem = Memory[ 0xFF47 ]
+		local WinPal = {
+		band( bshr(PalMem, 2), 3),
+		band( bshr(PalMem, 4), 3),
+		band( bshr(PalMem, 6), 3) }
+
+		WinPal[0] = band( PalMem, 3 )
+
+
+
+
+
+
+
+		local WinMap = WindowMap
+
+			for i = 0, YMax do
+
+				for j = 0, XMax do
+
+				local TileID
+					
+				if TileData == 0x8000 then
+					TileID = Memory[ WinMap + i*32 + j ]
+				else
+					TileID = Memory[ WinMap + i*32 + j ]
+					TileID = band(TileID, 127) - band(TileID, 128)
+					TileData = 0x9000
+				end
+
+				for k = 0,7 do
+
+					local ByteA = Memory[ TileData + TileID*16 + k*2]
+					local ByteB = Memory[ TileData + TileID*16 + k*2 + 1]
+
+					for l = 0,7 do
+
+						local BitA = band( bshr(ByteA, l), 1) --that's a lower-case L, not a 1
+						local BitB = band( bshr(ByteB, l), 1)
+							
+						local PixelX = (j*8 - l + 7 ) + WindowX 
+						local PixelY = (i*8 + k ) + WindowY
+
+						if PixelX >= 0 and PixelX < 160 and PixelY >= 0 and PixelY < 144 then
+
+							local Colour = ColourDB[ WinPal[ bor( bshl(BitB,1) ,  BitA) ] ]
+
+							local ArrayCoords = (PixelX + 1) + (PixelY + 1)*170
+
+								if Pixels[ArrayCoords] ~= Colour then
+
+									love.graphics.setColor( Colour, Colour, Colour, 255 )
+									love.graphics.point( PixelX + 1.5, PixelY + 1.5 )
+
+									Pixels[ArrayCoords] = Colour
+
+								end
+						end
+					end
+				end
+			end
+		end
+	end
+
+
+
+
+
+
+
+
+	if SpriteSize == 8 then
+
+
+		local PalMem1 = Memory[ 0xFF49 ]
+		local PalMem2 = Memory[ 0xFF48 ]
+
+		for n = 0, 159, 4 do
+			local YPos = Memory[ 0xFE00 + n ]
+			if YPos > 0 and YPos < 160 then
+				local XPos = Memory[ 0xFE00 + (n+1) ]
+				if XPos > 0 and XPos < 168 then
+
+					local SpriteFlags = Memory[ 0xFE00 + (n+3) ]
+					
+					local TileID = Memory[ 0xFE00 + (n+2) ]
+					local Alpha =  band(SpriteFlags  , 128) == 128
+					local YFlip = band(SpriteFlags , 64)    == 64
+					local XFlip = band(SpriteFlags , 32)    == 32
+					local SPalID = band(SpriteFlags , 16)   == 16
+
+					if SPalID then
+						SpPal = {
+						band( bshr(PalMem1, 2), 3), 
+						band( bshr(PalMem1, 4), 3),
+						band( bshr(PalMem1, 6), 3) }
+					else
+						SpPal = {
+						band( bshr(PalMem2, 2), 3), 
+						band( bshr(PalMem2, 4), 3),
+						band( bshr(PalMem2, 6), 3) }
+					end
+
+
+					for i = 0,7 do
+
+						local ByteA = Memory[ 0x8000 + TileID*16 + i*2]
+						local ByteB = Memory[ 0x8000 + TileID*16 + i*2 + 1]
+
+						for j = 0,7 do
+
+						local BitA = band( bshr(ByteA, j), 1) --that's a lower-case L, not a 1
+						local BitB = band( bshr(ByteB, j), 1)
+
+							if ( bshl(BitB, 1) +  BitA) > 0 then
+
+								local PixelX = XPos - 1 + (XFlip and j - 7 or -j)
+								local PixelY = YPos - 16 + (YFlip and -i + 7 or i)
+
+								local ArrayCoords = (PixelX + 1) + (PixelY + 1)*170
+								
+								local Colour = ColourDB[ SpPal[ BitB*2 +  BitA] ]
+
+								if PixelX >= 0 and PixelX < 160 and PixelY >= 0 and PixelY < 144 then
+
+								if Pixels[ArrayCoords] ~= Colour then
+
+									love.graphics.setColor( Colour, Colour, Colour, 255 )
+									love.graphics.point( PixelX + 1.5, PixelY + 1.5 )
+
+									Pixels[ArrayCoords] = Colour
+
+								end
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	else
+
+		local PalMem1 = Memory[ 0xFF49 ]
+		local PalMem2 = Memory[ 0xFF48 ]
+
+		for n = 0, 159, 4 do
+			local YPos = Memory[ 0xFE00 + n ]
+			if YPos > 0 and YPos < 160 then
+				local XPos = Memory[ 0xFE00 + (n+1) ]
+				if XPos > 0 and XPos < 168 then
+
+					local SpriteFlags = Memory[ 0xFE00 + (n+3) ]
+					
+					local TileID = band( Memory[ 0xFE00 + (n+2) ] , 0xFE )
+					local Alpha =  band(SpriteFlags  , 128) == 128
+					local YFlip = band(SpriteFlags , 64)    == 64
+					local XFlip = band(SpriteFlags , 32)    == 32
+					local SPalID = band(SpriteFlags , 16)   == 16
+
+					if SPalID then
+						SpPal = {
+						band( bshr(PalMem1, 2), 3), 
+						band( bshr(PalMem1, 4), 3),
+						band( bshr(PalMem1, 6), 3) }
+					else
+						SpPal = {
+						band( bshr(PalMem2, 2), 3), 
+						band( bshr(PalMem2, 4), 3),
+						band( bshr(PalMem2, 6), 3) }
+					end
+
+
+					for i = 0,7 do
+
+						local ByteA = Memory[ 0x8000 + TileID*16 + i*2]
+						local ByteB = Memory[ 0x8000 + TileID*16 + i*2 + 1]
+
+						for j = 0,7 do
+
+							local BitA = band( bshr(ByteA, j), 1) --that's a lower-case L, not a 1
+							local BitB = band( bshr(ByteB, j), 1)
+
+
+							if BitB*2 + BitA > 0 then
+
+								local PixelX = XPos - 1 + (XFlip and j - 7 or -j)
+								local PixelY = YPos - 16 + (YFlip and -i + 7 or i) + (YFlip and 8 or 0)
+
+								local ArrayCoords = (PixelX + 1) + (PixelY + 1)*170
+								
+								local Colour = ColourDB[ SpPal[ BitB*2 + BitA ] ]
+
+								if PixelX >= 0 and PixelX < 160 and PixelY >= 0 and PixelY < 144 then
+
+									if Pixels[ArrayCoords] ~= Colour then
+
+										love.graphics.setColor( Colour, Colour, Colour, 255 )
+										love.graphics.point( PixelX + 1.5, PixelY + 1.5 )
+
+										Pixels[ArrayCoords] = Colour
+
+									end
+								end
+							end
+						end
+					end
+
+					local n2 = n + 1
+					
+					local TileID2 = TileID + 0x01
+
+
+					for i = 0,7 do
+
+						local ByteA = Memory[ 0x8000 + TileID2*16 + i*2 + 0]
+						local ByteB = Memory[ 0x8000 + TileID2*16 + i*2 + 1]
+
+						for j = 0,7 do
+
+							local BitA = band( bshr(ByteA, j), 1) --that's a lower-case L, not a 1
+							local BitB = band( bshr(ByteB, j), 1)
+
+
+							if BitB*2 + BitA > 0 then
+
+								local PixelX = XPos - 1 + (XFlip and j - 7 or -j) 
+								local PixelY = YPos - 16 + (YFlip and -i + 7 or i) + (YFlip and 0 or 8)
+
+								local ArrayCoords = (PixelX + 1) + (PixelY + 1)*170
+								
+								local Colour = ColourDB[ SpPal[ BitB*2 + BitA ] ]
+
+								if PixelX >= 0 and PixelX < 160 and PixelY >= 0 and PixelY < 144 then
+
+									if Pixels[ArrayCoords] ~= Colour then
+
+										love.graphics.setColor( Colour, Colour, Colour, 255 )
+										love.graphics.point( PixelX + 1.5, PixelY + 1.5 )
+
+										Pixels[ArrayCoords] = Colour
+
+									end
+								end
+							end
+						end
+					end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+				end
+			end
+		end
+	end
+end
+
+
+]]--
+local band = bit.band
+local bor = bit.bor
+local bxor = bit.bxor
+local bshr = bit.rshift
+local bshl = bit.lshift
+
+---------------
+-- Interupts --
+---------------
+
+function RestartInterupts()
+
+	-- Interupt Hardware Registers
+	IE = 0 -- Interupt Enable Register: Bit0 = VBlank, Bit1 = LCD, Bit2 = Timer, Bit4 = Joypad
+	IF = 0 -- Interupt Request Register
+
+end
+
+-- Interupt Enable
+MRead[ 0xFFFF ] = function(  Addr ) return IE end
+MWrite[ 0xFFFF ] = function(  Addr, Data ) IE = band(Data , 0x1F) end
+
+-- Interupt Request
+MRead[ 0xFF0F ] = function(  Addr )  return IF end
+MWrite[ 0xFF0F ] = function(  Addr, Data ) IF = band(Data , 0x1F) end
+
+
+function UpdateInterupts()
+
+	if IME and IE > 0 and IF > 0 then
+		if ( band( IE, 1 ) == 1) and ( band( IF, 1 ) == 1) then --VBlank interrupt
+			
+			IME = false
+			Halt = false
+
+			IF = band( IF, (255 - 1) )
+
+			SP = SP - 2
+			Write(SP + 1, bshr( band( PC , 0xFF00 ), 8 ) )
+			Write(SP    , band( PC , 0xFF )       )
+
+			PC = 0x40
+
+		elseif ( band( IE, 2 ) == 2) and ( band( IF, 2 ) == 2) then -- LCD Interrupt
+
+			IME = false
+			Halt = false
+
+			IF = band( IF, (255 - 2) )
+
+			SP = SP - 2
+			Write(SP + 1, bshr( band( PC , 0xFF00), 8 ) )
+			Write(SP    , band( PC , 0xFF )       )
+
+			PC = 0x48
+
+		elseif ( band( IE, 4 ) == 4) and ( band( IF, 4 ) == 4) then -- TImer Interrupt
+
+			IME = false
+			Halt = false
+
+			IF = band( IF, (255 - 4) )
+
+			SP = SP - 2
+			Write(SP + 1, bshr( band( PC , 0xFF00), 8 ) )
+			Write(SP    , band( PC , 0xFF )       )
+
+			PC = 0x50
+
+		elseif ( band( IE, 8 ) == 8) and ( band( IF, 8 ) == 8) then
+
+			IME = false
+			Halt = false
+
+			IF = band( IF, (255 - 8) )
+
+			SP = SP - 2
+			Write(SP + 1, bshr( band( PC , 0xFF00), 8 ) )
+			Write(SP    , band( PC , 0xFF )       )
+
+			PC = 0x58
+
+		elseif ( band( IE, 16 ) == 16) and ( band( IF, 16 ) == 16) then -- Joy Interrupt
+
+			IME = false
+			Halt = false
+
+			IF = band( IF, (255 - 16) )
+
+			SP = SP - 2
+			Write(SP + 1, bshr( band( PC , 0xFF00), 8 ) )
+			Write(SP    , band( PC , 0xFF )       )
+
+			PC = 0x60
+
+		end
+	end
+
+end
+
+
+
+
+
+local band = bit.band
+local bor = bit.bor
+local bxor = bit.bxor
+local bshr = bit.rshift
+local bshl = bit.lshift
+
+
+
+function RestartTimers()
+
+
+	------------------------------
+	-- Timer Hardware Registers --
+	------------------------------
+	
+	-- Timer
+	TimerEnabled = false 	-- Is the timer enabled?
+	TimerCounter = 1024  	-- The number of cycles per timer incriment
+	TimerCycles   = 0		-- The cycle counter for timers, resets every timer incriment.
+	TimerDB = { [0] = 1024, 16, 64, 256 } -- Cheaper than an elseif stack
+	TimerBase = 0 			-- The timer base, when timer overflows it resets itself to this.
+	Timer = 0			-- The timer itself
+	
+	-- Divider Timer (Incriments every 256 cycles, no interupt)
+	DividerCycles = 0 		-- The cycle counter for the Didiver, resets every timer incriment
+	Divider = 0			-- Easier to store it in a variable than in memory. 
+
+
+end
+
+
+
+
+
+-- Timers
+MRead[ 0xFF04 ] = function( Addr ) return Divider end -- Divider
+MRead[ 0xFF05 ] = function( Addr ) return Timer end -- Timer
+MRead[ 0xFF06 ] = function( Addr ) return TimerBase end -- What the timer resets to
+MRead[ 0xFF07 ] = function( Addr ) return IO[ 0xFF07 ] end -- Timer control register, only return first 3 bits?
+
+MWrite[ 0xFF04 ] = function( Addr, Data ) Divider = 0 end -- Divider reset to 0 when written to
+MWrite[ 0xFF05 ] = function( Addr, Data ) Timer = Data end -- Set timer
+MWrite[ 0xFF06 ] = function( Addr, Data ) TimerBase = Data end -- Set timer base
+MWrite[ 0xFF07 ] = function( Addr, Data )
+	IO[ 0xFF07 ] = band(Data, 5)
+	TimerCounter = TimerDB[ band(Data , 0x3)] -- Set the timer incriment rate to the first 2 bits with a lookup DB
+	TimerEnabled = band(Data , 0x4) == 0x4 -- 3rd byte enables/disables the timer
+end
+
+
+
+
+
+
+
+
+function UpdateTimers()
+	DividerCycles = DividerCycles + Cycle
+	if DividerCycles > 255 then
+		Divider = band ( (Divider + 1) , 0xFF )
+		DividerCycles = DividerCycles - 256
+	end
+
+
+	if TimerEnabled then -- if the timer is enabled
+		TimerCycles = TimerCycles + Cycle -- incriment the cycles until next timer inc
+		if TimerCycles > TimerCounter then -- if they overflow, then reset the timer cycles and incriment the timer
+			Timer = Timer +1
+			TimerCycles = TimerCycles - TimerCounter
+			if Timer > 255 then -- if the timer overflows, reset the timer and do the timer interupt. 
+				Timer = TimerBase
+				IF = bor( IF, 4 )
+			end
+		end
+	end
+end
+
+
+local band = bit.band
+local bor = bit.bor
+local bxor = bit.bxor
+local bshr = bit.rshift
+local bshl = bit.lshift
+
+
+
+function isDown( b )
+    local x, y, z = commands.getBlockPosition()
+    local plate = commands.getBlockInfo(x + b[1], y + b[2], z + b[3])
+    return plate.state.powered
+    -- we say the button is pressed if the pressure plate is pressed.
+end
+
+
+function UpdateKeys()
+
+	local OldButtonByte = ButtonByte
+	local OldDPadByte = DPadByte
+
+	ButtonByte = ( isDown( START ) and band( ButtonByte, (15 - 8) )  or bor( ButtonByte, 8 ) )
+	ButtonByte = ( isDown( SELECT ) and band( ButtonByte, (15 - 4) )  or bor( ButtonByte, 4 ) ) 
+	ButtonByte = ( isDown( BUTTONB ) and band( ButtonByte, (15 - 2) )  or bor( ButtonByte, 2 ) )
+	ButtonByte = ( isDown( BUTTONA ) and band( ButtonByte, (15 - 1) )  or bor( ButtonByte, 1 ) ) 
+
+	DPadByte = ( isDown( DOWN ) and    band( DPadByte, (15 - 8) )  or bor( DPadByte, 8 ) ) 
+	DPadByte = ( isDown( UP ) and  band( DPadByte, (15 - 4) )  or bor( DPadByte, 4 ) )
+	DPadByte = ( isDown( LEFT ) and  band( DPadByte, (15 - 2) )  or bor( DPadByte, 2 ) ) 
+	DPadByte = ( isDown( RIGHT ) and band( DPadByte, (15 - 1) )  or bor( DPadByte, 1 ) ) 
+
+	if ButtonByte ~= OldButtonByte or DPadBye ~= OldDPadByte then
+		IF = bor( IF, 16 )
+	end
+
+end
+
+
+function RestartJoypad()
+
+	-- 
+	DPadByte = 0xF
+	ButtonByte = 0xF
+
+	SelectButtonKeys = true
+	SelectDirectionKeys = false
+
+end
+
+
+
+
+
+
+
+--- JOYP
+
+MRead[ 0xFF00 ] = function(  Addr )
+	if SelectDirectionKeys then
+		return ButtonByte + (SelectDirectionKeys and 16 or 0) + (SelectButtonKeys and 32 or 0)
+	elseif SelectButtonKeys then
+		return DPadByte + (SelectDirectionKeys and 16 or 0) + (SelectButtonKeys and 32 or 0)
+	end
+end
+
+MWrite[ 0xFF00 ] = function(  Addr, Data )
+	SelectDirectionKeys = band(Data, 16) == 16 
+	SelectButtonKeys = band(Data, 32) == 32
+end
+local band = bit.band
+local bor = bit.bor
+local bxor = bit.bxor
+local bshr = bit.rshift
+local bshl = bit.lshift
+
+
+function RestartSound() 
+        -- no sound, this is minecraft.
+        -- Hence, all the actual sound calls are dummied out.
+
+
+	--Setup the waveforms for the 4 Square waveforms duties. 
+
+	--[[SquareWaveData = {}
+
+
+	-- Middle A + 1Octave, 880Hz Square Wave. 50% Duty
+	SQ50 = love.sound.newSoundData( 16, 880*16, 16, 1 )
+	for n = 0, 7 do SQ50:setSample( n , 1 ) end
+	for n = 8, 15 do SQ50:setSample( n , -1 ) end
+
+	SQ25 = love.sound.newSoundData( 16, 880*16, 16, 1 )
+	for n = 0, 3 do SQ50:setSample( n , 1 ) end
+	for n = 4, 15 do SQ50:setSample( n , -1 ) end
+
+	SQ75 = love.sound.newSoundData( 16, 880*16, 16, 1 )
+	for n = 0, 11 do SQ50:setSample( n , 1 ) end
+	for n = 12, 15 do SQ50:setSample( n , -1 ) end
+
+	SQ12 = love.sound.newSoundData( 16, 880*16, 16, 1 )
+	for n = 0, 1 do SQ50:setSample( n , 1 ) end
+	for n = 2, 15 do SQ50:setSample( n , -1 ) end
+
+	SquareWaveData[0] = SQ12
+	SquareWaveData[1] = SQ25
+	SquareWaveData[2] = SQ50
+	SquareWaveData[3] = SQ75
+
+
+
+
+
+
+
+	Square1 = love.audio.newSource( SQ50, "static" )
+	Square1:setLooping( true )
+
+	Square2 = love.audio.newSource( SQ50, "static" )
+	Square2:setLooping( true )
+        --]]
+
+
+	SoundCycle = 0
+
+
+	Square1Enabled = false
+
+	Square1Frequency = 0
+
+	Square1SweepTime = 0
+	Square1SweepShfit = 0
+	Square1SweepDirection = 0
+	Square1SweepCounter = 0
+
+	Square1LengthCounter = 0
+	Square1LengthEnable = false
+	Square1Duty = 2
+
+	Square1Volume = 15
+	Square1VolumeDirection = 0 
+	Square1VolumeSweep = 0 
+	Square1VolumeCounter = 0
+
+
+
+
+
+
+	Square2Enabled = false
+
+	Square2Frequency = 0
+
+	Square2LengthCounter = 0
+	Square2LengthEnable = false
+	Square2Duty = 2
+
+	Square2Volume = 15
+	Square2VolumeDirection = 0 
+	Square2VolumeSweep = 0 
+	Square2VolumeCounter = 0
+
+
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-- Square 1
+
+--NR10, Sweep Register
+MRead[ 0xFF10 ] = function( Addr ) return IO[Addr] end
+
+MWrite[ 0xFF10 ] = function( Addr, Data )
+	IO[Addr] = Data
+
+	Square1SweepShift = band( Data, 7 )
+	Square1SweepDirection = band( Data, 8 )
+	Square1SweepTime = bshr( Data, 4 ) * 2
+
+end
+
+--NR11, Duty & Sound Length
+MRead[ 0xFF11 ] = function( Addr ) return IO[Addr] end
+
+MWrite[ 0xFF11 ] = function( Addr, Data )
+
+	Square1LengthCounter = 64 - band( Data, 0x3F )
+
+	if band( Data, 0xC0 ) ~= Square1Duty then
+		Square1Duty = band( Data, 0xC0 )
+		IO[Addr] = Square1Duty
+
+		--[[Square1:stop()
+		Square1 = love.audio.newSource( SquareWaveData[ bshr( Data, 6 ) ], "static" )
+		Square1:setLooping( true )
+		Square1:setPitch( (131072/(2048-Square1Frequency))/880 )
+		Square1:setVolume(Square1Volume/15)
+
+		if Square1Enabled then
+			Square1:play()
+		end
+                --]]
+	end
+
+
+end
+
+--NR12, Volume Envelope
+MRead[ 0xFF12 ] = function( Addr ) return IO[Addr] end
+
+MWrite[ 0xFF12 ] = function( Addr, Data )
+	IO[Addr] = Data
+
+
+	Square1Volume = bshr( band( Data, 0xF0 ), 4 )
+	Square1VolumeDirection = bshr( band( Data, 8 ), 3 ) 
+	Square1VolumeSweep = band( Data, 7 )
+
+	--Square1:setVolume(Square1Volume/15)
+
+end
+
+--NR13, Frequency Lo
+MRead[ 0xFF13 ] = function( Addr ) return 0 end
+
+MWrite[ 0xFF13 ] = function( Addr, Data )
+	
+	Square1Frequency = band( Square1Frequency, 0xF00 ) + Data
+
+	--Square1:setPitch( (131072/(2048-Square1Frequency))/880 )
+
+end
+
+--NR14, Frequency Hi
+MRead[ 0xFF14 ] = function( Addr ) return IO[Addr] end
+
+MWrite[ 0xFF14 ] = function( Addr, Data )
+
+	Square1Frequency = band( Square1Frequency, 0x0FF ) + bshl( band( Data, 0x7 ), 8)
+	Square1LengthEnable = band( Data, 0x40 ) == 0x40
+	IO[Addr] = band( Data, 0x40 )
+
+	if band( Data, 0x80 ) == 0x80 then 
+		Square1Enabled = true
+		--[[Square1:play()
+		Square1:setPitch( (131072/(2048-Square1Frequency))/880 )
+		Square1:setVolume(Square1Volume/15)
+                --]]
+		Square1LengthCounter = 64
+	end
+
+
+	
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-- Square 2
+
+
+--NR21, Duty & Sound Length
+MRead[ 0xFF16 ] = function( Addr ) return IO[Addr] end
+
+MWrite[ 0xFF16 ] = function( Addr, Data )
+
+	Square2LengthCounter = 64 - band( Data, 0x3F )
+
+	if band( Data, 0xC0 ) ~= Square2Duty then
+		Square2Duty = band( Data, 0xC0 )
+		IO[Addr] = Square2Duty
+
+		--[[Square2:stop()
+		Square2 = love.audio.newSource( SquareWaveData[ bshr( Data, 6 ) ], "static" )
+		Square2:setLooping( true )
+		Square2:setPitch( (131072/(2048-Square2Frequency))/880 )
+		Square2:setVolume(Square2Volume/15)
+
+		if Square2Enabled then
+			Square2:play()
+		end
+                --]]
+	end
+
+
+end
+
+--NR22, Volume Envelope
+MRead[ 0xFF17 ] = function( Addr ) return IO[Addr] end
+
+MWrite[ 0xFF17 ] = function( Addr, Data )
+	IO[Addr] = Data
+
+
+	Square2Volume = bshr( band( Data, 0xF0 ), 4 )
+	Square2VolumeDirection = bshr( band( Data, 8 ), 3 ) 
+	Square2VolumeSweep = band( Data, 7 )
+
+	--Square2:setVolume(Square2Volume/15)
+
+end
+
+--NR23, Frequency Lo
+MRead[ 0xFF18 ] = function( Addr ) return 0 end
+
+MWrite[ 0xFF18 ] = function( Addr, Data )
+	
+	Square2Frequency = band( Square2Frequency, 0xF00 ) + Data
+
+	--Square2:setPitch( (131072/(2048-Square2Frequency))/880 )
+
+end
+
+--NR24, Frequency Hi
+MRead[ 0xFF19 ] = function( Addr ) return IO[Addr] end
+
+MWrite[ 0xFF19 ] = function( Addr, Data )
+
+	Square2Frequency = band( Square2Frequency, 0x0FF ) + bshl( band( Data, 0x7 ), 8)
+	Square2LengthEnable = band( Data, 0x40 ) == 0x40
+	IO[Addr] = band( Data, 0x40 )
+
+	if band( Data, 0x80 ) == 0x80 then 
+		Square2Enabled = true
+		--[[Square2:play()
+		Square2:setPitch( (131072/(2048-Square2Frequency))/880 )
+		Square2:setVolume(Square2Volume/15)
+                --]]
+		Square2LengthCounter = 64
+	end
+
+
+	
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function UpdateSound()
+
+	SoundCycle = SoundCycle + Cycle
+
+	if SoundCycle > 16383 then
+		SoundCycle = SoundCycle - 16384
+		--1/256th of a second
+
+		if Square1Enabled then 
+
+
+			if Square1SweepTime > 0 and Square1SweepShift > 0 then
+				Square1SweepCounter = Square1SweepCounter + 1
+				if Square1SweepCounter == Square1SweepTime then
+					Square1SweepCounter = 0
+
+					local Square1FrequencyShadow = Square1Frequency / bshl( 1, Square1SweepShift )
+
+					if Square1SweepDirection == 0 then
+						Square1FrequencyShadow = Square1Frequency + Square1FrequencyShadow
+
+						if Square1FrequencyShadow > 2047 then
+							Square1Enabled = false
+							--Square1:stop()
+						else
+							Square1Frequency = Square1FrequencyShadow
+							--Square1:setPitch( (131072/(2048-Square1Frequency))/880 )
+							--Square1:setVolume(Square1Volume/15)
+						end
+
+					else
+						Square1FrequencyShadow = Square1Frequency - Square1FrequencyShadow
+
+						if Square1FrequencyShadow > 2047 then
+							Square1Enabled = false
+							--Square1:stop()
+						else
+							Square1Frequency = Square1FrequencyShadow
+							--Square1:setPitch( (131072/(2048-Square1Frequency))/880 )
+							--Square1:setVolume(Square1Volume/15)
+						end
+
+					end
+				end
+			end
+
+			if Square1LengthEnable then
+				Square1LengthCounter = Square1LengthCounter - 1
+
+				if Square1LengthCounter == 0 then
+					--Square1:stop()
+					Square1Enabled = false
+					Square1LengthEnable = false
+				end
+			end
+
+			if Square1VolumeSweep ~= 0 then
+				Square1VolumeCounter = Square1VolumeCounter + 1
+				if Square1VolumeCounter > 4* Square1VolumeSweep - 1 then
+					Square1VolumeCounter = 0
+
+					local Square1VolumeShadow = Square1Volume + ( Square1VolumeDirection * 2 - 1 ) 
+
+					if Square1VolumeShadow < 0 or Square1VolumeShadow > 15 then
+						Square1VolumeSweep = 0 
+					else
+						Square1Volume = Square1VolumeShadow
+						--Square1:setVolume(Square1Volume/15)
+					end
+				end
+			end
+
+		end
+
+
+
+
+
+
+
+
+		if Square2Enabled then 
+
+			if Square2LengthEnable then
+				Square2LengthCounter = Square2LengthCounter - 1
+
+				if Square2LengthCounter == 0 then
+					--Square2:stop()
+					Square2Enabled = false
+					Square2LengthEnable = false
+				end
+			end
+
+			if Square2VolumeSweep ~= 0 then
+				Square2VolumeCounter = Square2VolumeCounter + 1
+				if Square2VolumeCounter > 4*Square2VolumeSweep - 1 then
+					Square2VolumeCounter = 0
+
+					local Square2VolumeShadow = Square2Volume + ( Square2VolumeDirection * 2 - 1 )
+
+					if Square2VolumeShadow < 0 or Square2VolumeShadow > 15 then
+						Square2VolumeSweep = 0 
+					else
+						Square2Volume = Square2VolumeShadow
+						--Square2:setVolume(Square2Volume/15)
+					end
+				end
+			end
+
+		end
+
+
+
+	end
+
+
+
+end
+m1 = peripheral.wrap("monitor_0")
+m2 = peripheral.wrap("monitor_1")
+m1.setTextScale(0.5)
+m2.setTextScale(0.5)
+canvas = multipaint({{m1, {0, 159}, {0,80}}, {m2, {0, 159}, {81, 143}}})
+-- facing positive z and x
+UP = {0, 1, 1}
+DOWN = {0, 1, -1}
+LEFT = {-1, 1, 0}
+RIGHT = {1, 1, 0}
+
+START = {4, 1, -1}
+SELECT = {3, 1, -1}
+BUTTONB = {6, 1, -1}
+BUTTONA = {7, 1, 0}
+
+-- vim:syntax=lua
+argv = {...}
+--[[
+modules = {
+    "gmb_opcodes",
+    "gmb_cb_opcodes",
+    "gmb_memory",
+    "gameboy",
+    "gmb_gpu",
+    "gmb_interupts",
+    "gmb_timers",
+    "gmb_joypad",
+    "gmb_sound",
+    "config",
+}
+
+for i = 1, #modules do
+    -- crappy require replacement
+    loadfile(modules[i]..".lua")
+end
+--]]
+function math.clamp(x, min, max)
+    return x < min and min or (x > max and max or x)
+end
+
+function ccload()
+
+    Options = {}
+    Restart()
+
+    ColourPalette = {}
+    ColourPalette[3] = colors.black
+    ColourPalette[2] = colors.gray
+    ColourPalette[1] = colors.lightGray
+    ColourPalette[0] = colors.white
+end
+
+function startrom()
+    if commands == nil then
+        print("error: computer is not command-capable.")
+        print("We need this to check input.")
+        exit()
+    end
+    if #argv == 0 then
+        print("usage: gbemu [rom]")
+        exit()
+    end
+     Restart()
+    LoadRom(argv[1])
+    State = "emulate"
+end
+
+function run()
+    ccload()
+    startrom()
+    while 1 do
+        --os.sleep(1/20)
+        UpdateKeys()
+        Think()
+    end
+end
+run()
